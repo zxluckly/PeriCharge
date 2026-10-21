@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace PeripheralBattery
 {
@@ -16,7 +17,11 @@ namespace PeripheralBattery
 
         private DateTime _lastRefresh = DateTime.MinValue;
         private int _lastVersion = -1;
+        private static readonly Font MenuFont = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        private static readonly Font MenuTitleFont = new Font("Segoe UI", 9.5f, FontStyle.Bold, GraphicsUnit.Point);
+
         private volatile bool _refreshing;
+        private volatile bool _themeDirty;
         private bool _exiting;
         private ContextMenuStrip _openMenu;
         private string _lastHidSignature = string.Empty;
@@ -42,8 +47,18 @@ namespace PeripheralBattery
             _uiTimer.Tick += OnUiTick;
             _uiTimer.Start();
 
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+
             Log.Write("程序启动");
             StartRefresh();
+        }
+
+        private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            if (e.Category == UserPreferenceCategory.General || e.Category == UserPreferenceCategory.Color)
+            {
+                _themeDirty = true;
+            }
         }
 
         private void OnUiTick(object sender, EventArgs e)
@@ -51,6 +66,13 @@ namespace PeripheralBattery
             if (_exiting)
             {
                 return;
+            }
+
+            if (_themeDirty)
+            {
+                _themeDirty = false;
+                Theme.Invalidate();
+                _overlay.Invalidate();
             }
 
             if (!_refreshing && (DateTime.Now - _lastRefresh).TotalSeconds >= _settings.RefreshSeconds)
@@ -180,10 +202,20 @@ namespace PeripheralBattery
 
             ContextMenuStrip menu = new ContextMenuStrip();
             _openMenu = menu;
+            menu.Renderer = new DarkMenuRenderer();
             menu.ShowImageMargin = false;
+            menu.ShowCheckMargin = true;
+            menu.BackColor = UiTheme.MenuBackground;
+            menu.ForeColor = UiTheme.TextPrimary;
+            menu.Font = MenuFont;
+            menu.Padding = new Padding(0, 4, 0, 4);
+            menu.MinimumSize = new Size(250, 0);
 
-            ToolStripMenuItem title = new ToolStripMenuItem("外设电量监控");
+            ToolStripMenuItem title = new ToolStripMenuItem("外设电量");
             title.Enabled = false;
+            title.Font = MenuTitleFont;
+            title.ForeColor = UiTheme.TextSecondary;
+            title.Padding = new Padding(0, 4, 0, 6);
             menu.Items.Add(title);
 
             DeviceBattery[] all = _service.Snapshot();
@@ -191,19 +223,20 @@ namespace PeripheralBattery
             {
                 ToolStripMenuItem empty = new ToolStripMenuItem("（正在扫描或没有可读设备）");
                 empty.Enabled = false;
+                empty.Padding = new Padding(0, 4, 0, 4);
                 menu.Items.Add(empty);
             }
 
             foreach (DeviceBattery snapshot in all)
             {
                 DeviceBattery item = snapshot;
-                string stateText = item.Online ? item.Percent + "%" : "未连接";
-                string text = item.Name + "    " + stateText;
-                ToolStripMenuItem deviceItem = new ToolStripMenuItem(text, null, delegate
+                ToolStripMenuItem deviceItem = new ToolStripMenuItem(item.Name, null, delegate
                 {
                     ToggleDevice(item.Id);
                 });
+                deviceItem.Tag = item;
                 deviceItem.Checked = !_settings.HiddenIds.Contains(item.Id);
+                deviceItem.Padding = new Padding(0, 4, 0, 4);
                 menu.Items.Add(deviceItem);
             }
 
@@ -296,6 +329,21 @@ namespace PeripheralBattery
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("退出", null, delegate { Exit(); }));
 
+            foreach (ToolStripItem menuItem in menu.Items)
+            {
+                ToolStripMenuItem item = menuItem as ToolStripMenuItem;
+                if (item != null && item.Padding.Vertical == 0)
+                {
+                    item.Padding = new Padding(0, 4, 0, 4);
+                }
+            }
+
+            // 子菜单沿用同一套深色渲染
+            hidMenu.DropDown.Renderer = menu.Renderer;
+            hidMenu.DropDown.BackColor = UiTheme.MenuBackground;
+            hidMenu.DropDown.ForeColor = UiTheme.TextPrimary;
+            hidMenu.DropDown.Font = MenuFont;
+
             menu.Closed += delegate
             {
                 // 只解除引用；立即 Dispose 会让 ToolStrip 内部清理访问已释放对象
@@ -330,6 +378,7 @@ namespace PeripheralBattery
             }
 
             _exiting = true;
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             _uiTimer.Stop();
             _tray.Visible = false;
             _tray.Dispose();
@@ -344,6 +393,7 @@ namespace PeripheralBattery
             if (disposing && !_exiting)
             {
                 _exiting = true;
+                SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
                 _uiTimer.Stop();
                 _tray.Visible = false;
                 _tray.Dispose();

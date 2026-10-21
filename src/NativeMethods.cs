@@ -1,10 +1,134 @@
 using System;
+using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace PeripheralBattery
 {
     internal static class NativeMethods
     {
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct POINT
+        {
+            public int X;
+            public int Y;
+
+            public POINT(int x, int y)
+            {
+                X = x;
+                Y = y;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SIZE
+        {
+            public int cx;
+            public int cy;
+
+            public SIZE(int cx, int cy)
+            {
+                this.cx = cx;
+                this.cy = cy;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct APPBARDATA
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public uint uCallbackMessage;
+            public uint uEdge;
+            public RECT rc;
+            public IntPtr lParam;
+        }
+
+        internal const uint ABM_GETSTATE = 4;
+        internal const uint ABS_AUTOHIDE = 0x1;
+
+        [DllImport("shell32.dll")]
+        internal static extern uint SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
+
+        [DllImport("user32.dll")]
+        internal static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UpdateLayeredWindow(
+            IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,
+            IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr obj);
+
+        internal static void SetLayeredBitmap(IntPtr handle, Bitmap bitmap, Point location)
+        {
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memoryDc = CreateCompatibleDC(screenDc);
+            IntPtr hBitmap = IntPtr.Zero;
+            IntPtr oldBitmap = IntPtr.Zero;
+
+            try
+            {
+                hBitmap = bitmap.GetHbitmap(Color.FromArgb(0));
+                oldBitmap = SelectObject(memoryDc, hBitmap);
+
+                SIZE size = new SIZE(bitmap.Width, bitmap.Height);
+                POINT source = new POINT(0, 0);
+                POINT destination = new POINT(location.X, location.Y);
+                BLENDFUNCTION blend = new BLENDFUNCTION();
+                blend.BlendOp = 0;
+                blend.BlendFlags = 0;
+                blend.SourceConstantAlpha = 255;
+                blend.AlphaFormat = 1;
+
+                bool updated = UpdateLayeredWindow(
+                    handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, 2);
+                if (!updated)
+                {
+                    Log.Write("UpdateLayeredWindow 失败：" + Marshal.GetLastWin32Error());
+                }
+            }
+            finally
+            {
+                if (oldBitmap != IntPtr.Zero)
+                {
+                    SelectObject(memoryDc, oldBitmap);
+                }
+
+                if (hBitmap != IntPtr.Zero)
+                {
+                    DeleteObject(hBitmap);
+                }
+
+                DeleteDC(memoryDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         internal struct RECT
         {

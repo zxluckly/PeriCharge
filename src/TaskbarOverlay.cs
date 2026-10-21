@@ -1,16 +1,28 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.Windows.Forms;
 
 namespace PeripheralBattery
 {
     /// <summary>
     /// 锚定在任务栏通知区域左侧的无边框悬浮条。
-    /// 参考 TaskbarLyrics 的做法：TOPMOST + WS_EX_NOACTIVATE，按任务栏实时矩形定位。
+    /// 使用分层窗口（WS_EX_LAYERED + UpdateLayeredWindow）实现真正的透明背景，
+    /// 颜色跟随系统深浅色主题。
     /// </summary>
     internal sealed class TaskbarOverlay : Form
     {
+        private static readonly Font NameFont = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        private static readonly Font ValueFont = new Font("Segoe UI Semibold", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        private static readonly Font EmptyFont = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+
+        private const int IconSize = 16;
+        private const int MaxNameWidth = 260;
+        private const int PillWidth = 52;
+        private const int PillHeight = 18;
+
         private readonly Timer _positionTimer;
         private DeviceBattery[] _items = new DeviceBattery[0];
         private string _emptyText = "正在扫描蓝牙设备…";
@@ -27,7 +39,7 @@ namespace PeripheralBattery
             StartPosition = FormStartPosition.Manual;
             DoubleBuffered = true;
             BackColor = Color.FromArgb(28, 28, 28);
-            Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+            Font = NameFont;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
 
             _positionTimer = new Timer();
@@ -42,6 +54,7 @@ namespace PeripheralBattery
                 CreateParams cp = base.CreateParams;
                 cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
                 cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+                cp.ExStyle |= 0x00080000; // WS_EX_LAYERED
                 return cp;
             }
         }
@@ -49,6 +62,11 @@ namespace PeripheralBattery
         protected override bool ShowWithoutActivation
         {
             get { return true; }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            // 分层窗口由 UpdateLayeredWindow 负责绘制
         }
 
         private float DpiScale
@@ -93,32 +111,26 @@ namespace PeripheralBattery
         private void RefreshLayout()
         {
             float scale = DpiScale;
-            int padding = (int)Math.Round(12 * scale);
-            int gap = (int)Math.Round(10 * scale);
+            int padding = (int)Math.Round(14 * scale);
+            int gap = (int)Math.Round(14 * scale);
+            int width;
+            int height = Math.Max((int)Math.Round(34 * scale), (int)Math.Round(24 * scale));
 
-            int contentWidth;
-            if (_items.Length == 0)
+            using (Bitmap measureBitmap = new Bitmap(1, 1, PixelFormat.Format32bppArgb))
+            using (Graphics graphics = Graphics.FromImage(measureBitmap))
             {
-                contentWidth = TextRenderer.MeasureText(_emptyText, Font).Width;
-            }
-            else
-            {
-                contentWidth = 0;
-                for (int i = 0; i < _items.Length; i++)
+                if (_items.Length == 0)
                 {
-                    contentWidth += MeasureItemWidth(_items[i]);
-                    if (i < _items.Length - 1)
-                    {
-                        contentWidth += gap;
-                    }
+                    int textWidth = (int)Math.Ceiling(graphics.MeasureString(_emptyText, EmptyFont).Width);
+                    width = textWidth + padding * 2 + (int)Math.Round(8 * scale);
+                }
+                else
+                {
+                    width = ComputeRequiredWidth(graphics, scale, padding, gap);
                 }
             }
 
-            // GDI 测量与实际绘制存在少量偏差，额外留出余量，避免长设备名被裁切
-            int slack = (int)Math.Round(16 * scale) * Math.Max(1, _items.Length);
-            int width = Math.Max(contentWidth + padding * 2 + slack, (int)(44 * scale));
-            int height = Math.Max(TextRenderer.MeasureText("电量", Font).Height + (int)(6 * scale), (int)(24 * scale));
-
+            width = Math.Max(width, (int)(72 * scale));
             if (Width != width || Height != height)
             {
                 Width = width;
@@ -126,20 +138,37 @@ namespace PeripheralBattery
             }
 
             Invalidate();
+            RenderLayered();
         }
 
-        private int MeasureItemWidth(DeviceBattery item)
+        private int ComputeRequiredWidth(Graphics graphics, float scale, int padding, int gap)
         {
-            float scale = DpiScale;
-            // GDI 测量值比实际绘制偏窄，按比例补偿
-            int nameWidth = (int)Math.Round(TextRenderer.MeasureText(item.Name, Font).Width * 1.15);
-            int percentWidth = (int)Math.Round(TextRenderer.MeasureText(GetStateText(item), Font).Width * 1.15);
-            return nameWidth + (int)Math.Round(6 * scale) + percentWidth;
+            int total = padding * 2;
+            for (int i = 0; i < _items.Length; i++)
+            {
+                total += MeasureItemWidth(graphics, _items[i], scale);
+                if (i < _items.Length - 1)
+                {
+                    total += gap;
+                }
+            }
+
+            return total + (int)Math.Round(4 * scale);
         }
 
-        private static string GetStateText(DeviceBattery item)
+        private static int MeasureItemWidth(Graphics graphics, DeviceBattery item, float scale)
         {
-            return item.Online ? item.Percent + "%" : "未连接";
+            int iconSize = (int)Math.Round(IconSize * scale);
+            int iconGap = (int)Math.Round(6 * scale);
+            int nameGap = (int)Math.Round(8 * scale);
+            int pillWidth = (int)Math.Round(PillWidth * scale);
+
+            string name = UiTheme.GetDisplayName(item.Name);
+            int nameWidth = (int)Math.Ceiling(graphics.MeasureString(name, NameFont).Width)
+                + (int)Math.Round(8 * scale);
+            nameWidth = Math.Min(nameWidth, (int)Math.Round(MaxNameWidth * scale));
+
+            return iconSize + iconGap + nameWidth + nameGap + pillWidth;
         }
 
         private void Reposition()
@@ -165,9 +194,36 @@ namespace PeripheralBattery
 
             int barWidth = bar.Right - bar.Left;
             int barHeight = bar.Bottom - bar.Top;
+            int screenHeight = Screen.PrimaryScreen.Bounds.Height;
 
-            // 任务栏自动隐藏时高度会缩到几个像素，此时一并隐藏
-            if (barWidth <= 0 || barHeight < 20)
+            // 任务栏不显示时（自动隐藏、全屏应用遮挡、移出屏幕）一并隐藏
+            bool taskbarHidden = !NativeMethods.IsWindowVisible(taskbar)
+                || barWidth <= 0
+                || barHeight < 20
+                || bar.Top >= screenHeight
+                || bar.Bottom <= 0;
+
+            if (!taskbarHidden)
+            {
+                NativeMethods.APPBARDATA appBar = new NativeMethods.APPBARDATA();
+                appBar.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(appBar);
+                uint state = NativeMethods.SHAppBarMessage(NativeMethods.ABM_GETSTATE, ref appBar);
+                bool autoHide = (state & NativeMethods.ABS_AUTOHIDE) != 0;
+                if (autoHide)
+                {
+                    NativeMethods.POINT cursor;
+                    if (NativeMethods.GetCursorPos(out cursor))
+                    {
+                        // 底部任务栏自动隐藏时，鼠标不在底部区域就视为任务栏已隐藏
+                        if (cursor.Y < bar.Top - 2)
+                        {
+                            taskbarHidden = true;
+                        }
+                    }
+                }
+            }
+
+            if (taskbarHidden)
             {
                 Hide();
                 return;
@@ -180,12 +236,11 @@ namespace PeripheralBattery
                 NativeMethods.RECT trayRect;
                 if (NativeMethods.GetWindowRect(tray, out trayRect) && trayRect.Left > bar.Left)
                 {
-                    rightEdge = trayRect.Left - (int)Math.Round(8 * DpiScale);
+                    rightEdge = trayRect.Left - (int)Math.Round(10 * DpiScale);
                 }
             }
             else
             {
-                // Windows 11 任务栏结构变化时的回退：给时钟和图标区留出空间
                 rightEdge = bar.Right - (int)Math.Round(220 * DpiScale);
             }
 
@@ -199,11 +254,14 @@ namespace PeripheralBattery
             if (Location.X != x || Location.Y != y)
             {
                 Location = new Point(x, y);
+                Invalidate();
             }
 
             if (!Visible)
             {
                 Show();
+                Invalidate();
+                RenderLayered();
             }
 
             NativeMethods.SetWindowPos(
@@ -219,57 +277,194 @@ namespace PeripheralBattery
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            RenderLayered();
+        }
 
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            float scale = DpiScale;
-            int radius = (int)Math.Round(6 * scale);
-
-            Rectangle borderRect = new Rectangle(0, 0, Width - 1, Height - 1);
-            using (GraphicsPath path = CreateRoundedRect(borderRect, radius))
+        private void RenderLayered()
+        {
+            if (!IsHandleCreated || Width <= 0 || Height <= 0)
             {
-                using (SolidBrush background = new SolidBrush(Color.FromArgb(232, 32, 32, 32)))
+                return;
+            }
+
+            int width = Math.Max(1, Width);
+            int height = Math.Max(1, Height);
+            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+
+                    float scale = DpiScale;
+                    int padding = (int)Math.Round(14 * scale);
+                    int gap = (int)Math.Round(14 * scale);
+
+                    if (_items.Length > 0)
+                    {
+                        int required = ComputeRequiredWidth(g, scale, padding, gap);
+                        if (required > Width)
+                        {
+                            Width = required;
+                            RenderLayered();
+                            return;
+                        }
+
+                        DrawContent(g, scale, padding, gap);
+                    }
+                    else
+                    {
+                        DrawEmpty(g, scale, padding);
+                    }
+                }
+
+                NativeMethods.SetLayeredBitmap(Handle, bitmap, Location);
+            }
+        }
+
+        private void DrawContent(Graphics g, float scale, int padding, int gap)
+        {
+            DrawBackground(g, scale);
+
+            int iconSize = (int)Math.Round(IconSize * scale);
+            int iconGap = (int)Math.Round(6 * scale);
+            int nameGap = (int)Math.Round(8 * scale);
+            int pillWidth = (int)Math.Round(PillWidth * scale);
+            int pillHeight = (int)Math.Round(PillHeight * scale);
+            int dotSize = Math.Max(2, (int)Math.Round(2 * scale));
+
+            int x = padding;
+            for (int i = 0; i < _items.Length; i++)
+            {
+                DeviceBattery item = _items[i];
+                string displayName = UiTheme.GetDisplayName(item.Name);
+
+                Rectangle iconRect = new Rectangle(x, (Height - iconSize) / 2, iconSize, iconSize);
+                UiTheme.DrawDeviceIcon(
+                    g,
+                    item.Name,
+                    iconRect,
+                    item.Online ? UiTheme.TextSecondary : UiTheme.TextDisabled);
+                x += iconSize + iconGap;
+
+                int nameWidth = (int)Math.Ceiling(g.MeasureString(displayName, NameFont).Width)
+                    + (int)Math.Round(8 * scale);
+                nameWidth = Math.Min(nameWidth, (int)Math.Round(MaxNameWidth * scale));
+
+                using (StringFormat format = new StringFormat())
+                {
+                    format.LineAlignment = StringAlignment.Center;
+                    format.Trimming = StringTrimming.EllipsisCharacter;
+                    format.FormatFlags = StringFormatFlags.NoWrap;
+                    using (SolidBrush brush = new SolidBrush(item.Online ? UiTheme.TextPrimary : UiTheme.TextSecondary))
+                    {
+                        g.DrawString(
+                            displayName,
+                            NameFont,
+                            brush,
+                            new RectangleF(x, 0, nameWidth, Height),
+                            format);
+                    }
+                }
+
+                x += nameWidth + nameGap;
+
+                Rectangle pillRect = new Rectangle(x, (Height - pillHeight) / 2, pillWidth, pillHeight);
+                DrawPill(g, pillRect, item);
+                x += pillWidth;
+
+                if (i < _items.Length - 1)
+                {
+                    int dotX = x + gap / 2;
+                    using (SolidBrush dot = new SolidBrush(Color.FromArgb(52, UiTheme.TextSecondary)))
+                    {
+                        g.FillEllipse(dot, dotX - dotSize / 2, Height / 2 - dotSize / 2, dotSize, dotSize);
+                    }
+
+                    x += gap;
+                }
+            }
+        }
+
+        private void DrawEmpty(Graphics g, float scale, int padding)
+        {
+            DrawBackground(g, scale);
+
+            using (StringFormat format = new StringFormat())
+            {
+                format.LineAlignment = StringAlignment.Center;
+                format.Trimming = StringTrimming.EllipsisCharacter;
+                format.FormatFlags = StringFormatFlags.NoWrap;
+                using (SolidBrush brush = new SolidBrush(UiTheme.TextSecondary))
+                {
+                    g.DrawString(
+                        _emptyText,
+                        EmptyFont,
+                        brush,
+                        new RectangleF(padding, 0, Width - padding * 2, Height),
+                        format);
+                }
+            }
+        }
+
+        private void DrawBackground(Graphics g, float scale)
+        {
+            Rectangle full = new Rectangle(0, 0, Width, Height);
+            int radius = (int)Math.Round(9 * scale);
+            int alpha = Theme.IsLight() ? 238 : 232;
+
+            using (GraphicsPath path = UiTheme.RoundedRect(full, radius))
+            {
+                Color top = UiTheme.BackgroundTop;
+                Color bottom = UiTheme.BackgroundBottom;
+                using (LinearGradientBrush background = new LinearGradientBrush(
+                    full,
+                    Color.FromArgb(alpha, top),
+                    Color.FromArgb(alpha, bottom),
+                    LinearGradientMode.Vertical))
                 {
                     g.FillPath(background, path);
                 }
 
-                using (Pen border = new Pen(Color.FromArgb(60, 255, 255, 255), 1f))
+                using (Pen border = new Pen(UiTheme.Border, 1f))
                 {
                     g.DrawPath(border, path);
                 }
             }
 
-            int left = (int)Math.Round(10 * scale);
-            int textY = (Height - Font.Height) / 2;
-
-            if (_items.Length == 0)
+            using (Pen highlight = new Pen(UiTheme.Highlight, 1f))
             {
-                TextRenderer.DrawText(g, _emptyText, Font, new Point(left, textY), Color.FromArgb(190, 190, 190));
-                return;
+                g.DrawLine(highlight, radius, 1, Width - radius - 1, 1);
+            }
+        }
+
+        private static void DrawPill(Graphics g, Rectangle rect, DeviceBattery item)
+        {
+            bool online = item.Online;
+            Color accent = online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary;
+
+            using (GraphicsPath path = UiTheme.RoundedRect(rect, rect.Height / 2))
+            {
+                using (SolidBrush fill = new SolidBrush(Color.FromArgb(online ? 38 : 20, accent)))
+                {
+                    g.FillPath(fill, path);
+                }
+
+                using (Pen border = new Pen(Color.FromArgb(online ? 96 : 46, accent), 1f))
+                {
+                    g.DrawPath(border, path);
+                }
             }
 
-            int x = left;
-            for (int i = 0; i < _items.Length; i++)
+            string text = online ? item.Percent + "%" : "未连接";
+            using (StringFormat format = new StringFormat())
             {
-                DeviceBattery item = _items[i];
-                Color nameColor = item.Online
-                    ? Color.FromArgb(236, 236, 236)
-                    : Color.FromArgb(140, 140, 140);
-
-                string name = item.Name;
-                TextRenderer.DrawText(g, name, Font, new Point(x, textY), nameColor);
-                x += TextRenderer.MeasureText(name, Font).Width + (int)Math.Round(6 * scale);
-
-                string percentText = GetStateText(item);
-                Color percentColor = item.Online
-                    ? IconFactory.ColorFor(item.Percent)
-                    : Color.FromArgb(140, 140, 140);
-                TextRenderer.DrawText(g, percentText, Font, new Point(x, textY), percentColor);
-                x += TextRenderer.MeasureText(percentText, Font).Width;
-
-                if (i < _items.Length - 1)
+                format.Alignment = StringAlignment.Center;
+                format.LineAlignment = StringAlignment.Center;
+                using (SolidBrush brush = new SolidBrush(accent))
                 {
-                    x += (int)Math.Round(10 * scale);
+                    g.DrawString(text, ValueFont, brush, rect, format);
                 }
             }
         }
@@ -285,18 +480,6 @@ namespace PeripheralBattery
                     handler(this, EventArgs.Empty);
                 }
             }
-        }
-
-        private static GraphicsPath CreateRoundedRect(Rectangle rect, int radius)
-        {
-            int diameter = radius * 2;
-            GraphicsPath path = new GraphicsPath();
-            path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-            path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
-            path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
-            path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
-            path.CloseFigure();
-            return path;
         }
     }
 }

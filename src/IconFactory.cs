@@ -24,17 +24,35 @@ namespace PeripheralBattery
                         ? ColorFor(percent)
                         : Color.FromArgb(160, 160, 160);
 
-                    using (Pen pen = new Pen(Color.White, 2f))
+                    RectangleF body = new RectangleF(5f, 8f, 20f, 15f);
+                    using (GraphicsPath bodyPath = UiTheme.RoundedRect(body, 3f))
+                    using (Pen pen = new Pen(Color.White, 1.8f))
                     {
-                        g.DrawRectangle(pen, 4, 9, 21, 14);
-                        g.FillRectangle(Brushes.White, 26, 13, 3, 6);
+                        g.DrawPath(pen, bodyPath);
+                    }
+
+                    RectangleF cap = new RectangleF(25.2f, 12.5f, 3.2f, 6f);
+                    using (GraphicsPath capPath = UiTheme.RoundedRect(cap, 1.2f))
+                    using (SolidBrush capBrush = new SolidBrush(Color.White))
+                    {
+                        g.FillPath(capBrush, capPath);
                     }
 
                     int clamped = Math.Max(0, Math.Min(100, percent));
-                    int fillWidth = (int)Math.Round(17.0 * clamped / 100.0);
-                    using (SolidBrush brush = new SolidBrush(fillColor))
+                    float innerWidth = 16f * clamped / 100f;
+                    if (innerWidth > 0.5f)
                     {
-                        g.FillRectangle(brush, 6, 11, fillWidth, 10);
+                        RectangleF fillRect = new RectangleF(6.8f, 9.8f, innerWidth, 11.4f);
+                        Color light = Color.FromArgb(
+                            fillColor.A,
+                            Math.Min(255, fillColor.R + 45),
+                            Math.Min(255, fillColor.G + 45),
+                            Math.Min(255, fillColor.B + 45));
+                        using (GraphicsPath fillPath = UiTheme.RoundedRect(fillRect, 2f))
+                        using (LinearGradientBrush brush = new LinearGradientBrush(fillRect, light, fillColor, 90f))
+                        {
+                            g.FillPath(brush, fillPath);
+                        }
                     }
                 }
 
