@@ -33,6 +33,7 @@ namespace PeripheralBattery
 
             _overlay = new TaskbarOverlay();
             _overlay.MenuRequested += delegate { ShowMenu(); };
+            _overlay.RefreshRequested += delegate { StartRefresh(); };
             _overlay.SetScanning(true);
             _overlay.SetEnabled(settings.ShowTaskbar);
 

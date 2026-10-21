@@ -79,6 +79,26 @@ namespace PeripheralBattery
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern uint RegisterWindowMessage(string lpString);
 
+        internal delegate void WinEventDelegate(
+            IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+            int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr SetWinEventHook(
+            uint eventMin, uint eventMax, IntPtr hmodWinEventProc,
+            WinEventDelegate lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        internal static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        internal const uint EVENT_OBJECT_SHOW = 0x8002;
+        internal const uint EVENT_OBJECT_HIDE = 0x8003;
+        internal const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+        internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+
         internal const int GWL_STYLE = -16;
         internal const int WS_CHILD = 0x40000000;
         internal const int WS_POPUP = unchecked((int)0x80000000);
