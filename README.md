@@ -20,7 +20,6 @@ Windows 托盘 + 任务栏悬浮条，实时显示蓝牙外设电量。
 | Xbox 蓝牙手柄 | ✅ | 标准 GATT 电池服务；需处于连接状态 |
 | 2.4G USB 接收器（RK2.4G Dongle、2.4G Mouse） | ⚠️ | 已被 HID 识别，但电量走厂商私有协议，尚未实现 |
 | 经典蓝牙耳机/鼠标 | ⚠️ | 依赖 HFP 电池上报，部分设备不提供 |
-| 手机、平板 | — | 无电池服务，自动忽略 |
 
 ## 2.4G 接收器的实现路径
 
@@ -55,7 +54,7 @@ build.bat
 
 ## 实现说明
 
-- 任务栏悬浮条使用 **WPF 子窗口嵌入**：`SetParent` 到 `Shell_TrayWnd`，与 Lyricify 相同的做法
+- 任务栏悬浮条使用 **WPF 子窗口嵌入**：`SetParent` 到 `Shell_TrayWnd`
 - WPF `AllowsTransparency` 提供逐像素透明与圆角；任务栏隐藏/显示、移动随父窗口自动同步，无需轮询
 - 悬停时背景加深并显示刷新按钮；背景与文字颜色跟随系统深浅色主题
 - 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值，带超时等待；**不会把系统缓存值当作实时电量**
