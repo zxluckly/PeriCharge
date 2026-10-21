@@ -34,7 +34,6 @@ namespace PeripheralBattery
             _service = new BatteryService();
 
             _overlay = new WpfOverlay();
-            _overlay.MenuRequested += delegate { ShowMenu(); };
             _overlay.RefreshRequested += delegate { StartRefresh(); };
             _overlay.SetEnabled(_settings.ShowTaskbar);
 
@@ -261,8 +260,14 @@ namespace PeripheralBattery
             menu.PlacementTarget = null;
             menu.Placement = PlacementMode.MousePoint;
             _openMenu = menu;
+            menu.Opened += delegate
+            {
+                // 捕获鼠标，确保点击任务栏/桌面等外部区域时菜单能关闭
+                System.Windows.Input.Mouse.Capture(menu, System.Windows.Input.CaptureMode.SubTree);
+            };
             menu.Closed += delegate
             {
+                System.Windows.Input.Mouse.Capture(null);
                 if (ReferenceEquals(_openMenu, menu))
                 {
                     _openMenu = null;

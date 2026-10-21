@@ -32,7 +32,6 @@ namespace PeripheralBattery
         private IntPtr _taskbar;
         private HwndSource _source;
 
-        internal event EventHandler MenuRequested;
         internal event EventHandler RefreshRequested;
 
         internal WpfOverlay()
@@ -136,8 +135,15 @@ namespace PeripheralBattery
             _root.Child = dock;
             Content = _root;
 
-            _root.MouseLeftButtonUp += OnOverlayMouseUp;
-            _root.MouseRightButtonUp += OnOverlayMouseUp;
+            _root.MouseLeftButtonUp += delegate(object sender, System.Windows.Input.MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                EventHandler handler = RefreshRequested;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            };
             _root.MouseEnter += delegate { SetHovered(true); };
             _root.MouseLeave += delegate { SetHovered(false); };
 
@@ -154,6 +160,12 @@ namespace PeripheralBattery
                 _source.AddHook(WndProc);
             }
 
+            AttachToTaskbar();
+        }
+
+        protected override void OnContentRendered(EventArgs e)
+        {
+            base.OnContentRendered(e);
             AttachToTaskbar();
         }
 
@@ -248,6 +260,15 @@ namespace PeripheralBattery
             if (hwnd == IntPtr.Zero || _taskbar == IntPtr.Zero)
             {
                 return;
+            }
+
+            // WPF 在初始化/布局后可能重置父窗口，这里每次定位前校正
+            if (NativeMethods.GetParent(hwnd) != _taskbar)
+            {
+                NativeMethods.SetParent(hwnd, _taskbar);
+                int style = NativeMethods.GetWindowLong(hwnd, -16);
+                style = (style & ~unchecked((int)0x80000000)) | 0x40000000;
+                NativeMethods.SetWindowLong(hwnd, -16, style);
             }
 
             NativeMethods.RECT trayRect;
@@ -484,17 +505,6 @@ namespace PeripheralBattery
             }
 
             return "\uE7C3";
-        }
-
-        private void OnOverlayMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            EventHandler handler = MenuRequested;
-            if (handler != null)
-            {
-                handler(this, EventArgs.Empty);
-            }
-
-            e.Handled = true;
         }
 
         private static Color ToMediaColor(System.Drawing.Color color)
