@@ -55,8 +55,8 @@ build.bat
 
 ## 实现说明
 
-- 任务栏悬浮条使用顶层分层窗口（`UpdateLayeredWindow`）实现逐像素透明与圆角
-- 通过 `SetWinEventHook` 监听任务栏显示/隐藏/位置变化，事件驱动同步，不使用位置轮询
+- 任务栏悬浮条使用 **WPF 子窗口嵌入**：`SetParent` 到 `Shell_TrayWnd`，与 Lyricify 相同的做法
+- WPF `AllowsTransparency` 提供逐像素透明与圆角；任务栏隐藏/显示、移动随父窗口自动同步，无需轮询
 - 悬停时背景加深并显示刷新按钮；背景与文字颜色跟随系统深浅色主题
 - 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值，带超时等待；**不会把系统缓存值当作实时电量**
 - DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report，按 `status & 0x0F` 解析电量档位（每档 10%）

@@ -91,8 +91,34 @@ namespace PeripheralBattery
         [DllImport("user32.dll")]
         internal static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct TRACKMOUSEEVENT
+        {
+            public int cbSize;
+            public uint dwFlags;
+            public IntPtr hwndTrack;
+            public uint dwHoverTime;
+        }
+
+        [DllImport("user32.dll")]
+        internal static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
+
+        internal const int WM_MOUSEMOVE = 0x0200;
+        internal const int WM_LBUTTONUP = 0x0202;
+        internal const int WM_RBUTTONUP = 0x0205;
+        internal const int WM_MOUSELEAVE = 0x02A3;
+        internal const uint TME_LEAVE = 0x00000002;
+
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint colorKey, byte alpha, uint flags);
+
+        internal const uint LWA_ALPHA = 0x2;
 
         internal const uint EVENT_OBJECT_SHOW = 0x8002;
         internal const uint EVENT_OBJECT_HIDE = 0x8003;

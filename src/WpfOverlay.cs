@@ -1,0 +1,409 @@
+using System;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace PeripheralBattery
+{
+    /// <summary>
+    /// 嵌入任务栏的 WPF 透明悬浮条（与 Lyricify 相同的实现方式）。
+    /// WPF Window + AllowsTransparency 提供逐像素透明，SetParent 到 Shell_TrayWnd 实现嵌入。
+    /// </summary>
+    internal sealed class WpfOverlay : Window
+    {
+        private readonly Border _root;
+        private readonly StackPanel _content;
+        private readonly Border _refreshButton;
+        private readonly TextBlock _refreshGlyph;
+        private readonly uint _taskbarCreatedMessage;
+
+        private DeviceBattery[] _items = new DeviceBattery[0];
+        private string _emptyText = "正在扫描蓝牙设备…";
+        private bool _hovered;
+        private bool _enabled;
+        private IntPtr _taskbar;
+        private HwndSource _source;
+
+        internal event EventHandler MenuRequested;
+        internal event EventHandler RefreshRequested;
+
+        internal WpfOverlay()
+        {
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            ShowInTaskbar = false;
+            ResizeMode = ResizeMode.NoResize;
+            SizeToContent = SizeToContent.WidthAndHeight;
+            ShowActivated = false;
+            Topmost = false;
+
+            _root = new Border();
+            _root.CornerRadius = new CornerRadius(9);
+            _root.BorderThickness = new Thickness(1);
+            _root.Padding = new Thickness(14, 0, 14, 0);
+            _root.MinHeight = 34;
+            _root.Background = Brushes.Transparent;
+
+            DockPanel dock = new DockPanel();
+            _content = new StackPanel();
+            _content.Orientation = Orientation.Horizontal;
+            _content.VerticalAlignment = VerticalAlignment.Center;
+
+            _refreshButton = new Border();
+            _refreshButton.Width = 22;
+            _refreshButton.Height = 22;
+            _refreshButton.CornerRadius = new CornerRadius(11);
+            _refreshButton.Margin = new Thickness(8, 0, 0, 0);
+            _refreshButton.Cursor = System.Windows.Input.Cursors.Hand;
+            _refreshButton.Visibility = Visibility.Collapsed;
+            _refreshGlyph = new TextBlock();
+            _refreshGlyph.Text = "\uE72C";
+            _refreshGlyph.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            _refreshGlyph.FontSize = 12;
+            _refreshGlyph.HorizontalAlignment = HorizontalAlignment.Center;
+            _refreshGlyph.VerticalAlignment = VerticalAlignment.Center;
+            _refreshButton.Child = _refreshGlyph;
+            _refreshButton.MouseLeftButtonUp += delegate(object sender, System.Windows.Input.MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                EventHandler handler = RefreshRequested;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            };
+
+            DockPanel.SetDock(_refreshButton, Dock.Right);
+            dock.Children.Add(_refreshButton);
+            dock.Children.Add(_content);
+            _root.Child = dock;
+            Content = _root;
+
+            _root.MouseLeftButtonUp += OnOverlayMouseUp;
+            _root.MouseRightButtonUp += OnOverlayMouseUp;
+            _root.MouseEnter += delegate { SetHovered(true); };
+            _root.MouseLeave += delegate { SetHovered(false); };
+
+            _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+            ApplyTheme();
+        }
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            _source = PresentationSource.FromVisual(this) as HwndSource;
+            if (_source != null)
+            {
+                _source.AddHook(WndProc);
+            }
+
+            AttachToTaskbar();
+        }
+
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == (int)_taskbarCreatedMessage)
+            {
+                AttachToTaskbar();
+                handled = true;
+            }
+
+            return IntPtr.Zero;
+        }
+
+        internal void SetEnabled(bool enabled)
+        {
+            _enabled = enabled;
+            if (!enabled)
+            {
+                Hide();
+                return;
+            }
+
+            if (!IsVisible)
+            {
+                Show();
+            }
+
+            AttachToTaskbar();
+        }
+
+        internal void UpdateItems(DeviceBattery[] items)
+        {
+            _items = items;
+            _emptyText = items.Length == 0 ? "未发现可读取电量的设备" : string.Empty;
+            RebuildContent();
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+        }
+
+        internal void SetScanning(bool scanning)
+        {
+            if (scanning && _items.Length == 0)
+            {
+                _emptyText = "正在扫描蓝牙设备…";
+                RebuildContent();
+                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+            }
+        }
+
+        internal void RefreshPosition()
+        {
+            if (_enabled)
+            {
+                AttachToTaskbar();
+            }
+        }
+
+        private void AttachToTaskbar()
+        {
+            if (!_enabled)
+            {
+                return;
+            }
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            IntPtr taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
+            if (hwnd == IntPtr.Zero || taskbar == IntPtr.Zero)
+            {
+                return;
+            }
+
+            _taskbar = taskbar;
+            if (NativeMethods.GetParent(hwnd) != taskbar)
+            {
+                NativeMethods.SetParent(hwnd, taskbar);
+                int style = NativeMethods.GetWindowLong(hwnd, -16);
+                style = (style & ~unchecked((int)0x80000000)) | 0x40000000;
+                NativeMethods.SetWindowLong(hwnd, -16, style);
+            }
+
+            UpdatePosition();
+        }
+
+        private void UpdatePosition()
+        {
+            if (!_enabled)
+            {
+                return;
+            }
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero || _taskbar == IntPtr.Zero)
+            {
+                return;
+            }
+
+            NativeMethods.RECT trayRect;
+            if (!NativeMethods.GetWindowRect(_taskbar, out trayRect))
+            {
+                return;
+            }
+
+            IntPtr notify = NativeMethods.FindWindowEx(_taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
+            int rightEdge = trayRect.Right - 220;
+            if (notify != IntPtr.Zero)
+            {
+                NativeMethods.RECT notifyRect;
+                if (NativeMethods.GetWindowRect(notify, out notifyRect) && notifyRect.Left > trayRect.Left)
+                {
+                    rightEdge = notifyRect.Left - 8;
+                }
+            }
+
+            double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            if (scale <= 0)
+            {
+                scale = 1;
+            }
+
+            int width = (int)Math.Ceiling(ActualWidth * scale);
+            int height = (int)Math.Ceiling(ActualHeight * scale);
+            if (width <= 0 || height <= 0)
+            {
+                return;
+            }
+
+            int x = rightEdge - width;
+            int y = trayRect.Top + (trayRect.Bottom - trayRect.Top - height) / 2;
+
+            NativeMethods.POINT clientPoint = new NativeMethods.POINT();
+            clientPoint.X = x;
+            clientPoint.Y = y;
+            NativeMethods.ScreenToClient(_taskbar, ref clientPoint);
+
+            NativeMethods.SetWindowPos(
+                hwnd,
+                IntPtr.Zero,
+                clientPoint.X,
+                clientPoint.Y,
+                width,
+                height,
+                NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+        }
+
+        private void SetHovered(bool hovered)
+        {
+            if (_hovered == hovered)
+            {
+                return;
+            }
+
+            _hovered = hovered;
+            _refreshButton.Visibility = hovered ? Visibility.Visible : Visibility.Collapsed;
+            ApplyTheme();
+            UpdateLayout();
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+        }
+
+        private void ApplyTheme()
+        {
+            bool light = Theme.IsLight();
+            int alpha = _hovered ? (light ? 250 : 244) : (light ? 238 : 228);
+
+            Color top = ToMediaColor(UiTheme.BackgroundTop);
+            Color bottom = ToMediaColor(UiTheme.BackgroundBottom);
+            _root.Background = new LinearGradientBrush(
+                Color.FromArgb((byte)alpha, top.R, top.G, top.B),
+                Color.FromArgb((byte)alpha, bottom.R, bottom.G, bottom.B),
+                90);
+            _root.BorderBrush = new SolidColorBrush(ToMediaColor(UiTheme.Border));
+
+            Color text = ToMediaColor(UiTheme.TextPrimary);
+            _refreshButton.Background = new SolidColorBrush(Color.FromArgb(30, text.R, text.G, text.B));
+            _refreshButton.BorderBrush = new SolidColorBrush(Color.FromArgb(60, text.R, text.G, text.B));
+            _refreshButton.BorderThickness = new Thickness(1);
+            _refreshGlyph.Foreground = new SolidColorBrush(text);
+        }
+
+        private void RebuildContent()
+        {
+            _content.Children.Clear();
+
+            if (_items.Length == 0)
+            {
+                TextBlock empty = new TextBlock();
+                empty.Text = _emptyText;
+                empty.FontFamily = new FontFamily("Segoe UI");
+                empty.FontSize = 13;
+                empty.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+                empty.VerticalAlignment = VerticalAlignment.Center;
+                _content.Children.Add(empty);
+                return;
+            }
+
+            for (int i = 0; i < _items.Length; i++)
+            {
+                _content.Children.Add(CreateDeviceView(_items[i]));
+
+                if (i < _items.Length - 1)
+                {
+                    System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse();
+                    dot.Width = 2;
+                    dot.Height = 2;
+                    dot.Margin = new Thickness(14, 0, 14, 0);
+                    dot.VerticalAlignment = VerticalAlignment.Center;
+                    dot.Fill = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+                    dot.Opacity = 0.45;
+                    _content.Children.Add(dot);
+                }
+            }
+        }
+
+        private UIElement CreateDeviceView(DeviceBattery item)
+        {
+            bool online = item.Online;
+            Color primary = ToMediaColor(UiTheme.TextPrimary);
+            Color secondary = ToMediaColor(UiTheme.TextSecondary);
+            Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
+
+            StackPanel panel = new StackPanel();
+            panel.Orientation = Orientation.Horizontal;
+            panel.VerticalAlignment = VerticalAlignment.Center;
+
+            TextBlock icon = new TextBlock();
+            icon.Text = GetIconGlyph(item.Name);
+            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            icon.FontSize = 13;
+            icon.Foreground = new SolidColorBrush(online ? secondary : ToMediaColor(UiTheme.TextDisabled));
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            panel.Children.Add(icon);
+
+            TextBlock name = new TextBlock();
+            name.Text = UiTheme.GetDisplayName(item.Name);
+            name.FontFamily = new FontFamily("Segoe UI");
+            name.FontSize = 13;
+            name.MaxWidth = 180;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            name.Foreground = new SolidColorBrush(online ? primary : secondary);
+            name.Margin = new Thickness(6, 0, 0, 0);
+            name.VerticalAlignment = VerticalAlignment.Center;
+            panel.Children.Add(name);
+
+            Border pill = new Border();
+            pill.CornerRadius = new CornerRadius(9);
+            pill.Padding = new Thickness(8, 1, 8, 1);
+            pill.Margin = new Thickness(8, 0, 0, 0);
+            pill.VerticalAlignment = VerticalAlignment.Center;
+            pill.Background = new SolidColorBrush(Color.FromArgb(online ? (byte)32 : (byte)16, accent.R, accent.G, accent.B));
+            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(online ? (byte)84 : (byte)38, accent.R, accent.G, accent.B));
+            pill.BorderThickness = new Thickness(1);
+
+            TextBlock value = new TextBlock();
+            value.Text = online ? item.Percent + "%" : "未连接";
+            value.FontFamily = new FontFamily("Segoe UI");
+            value.FontSize = 12;
+            value.FontWeight = FontWeights.SemiBold;
+            value.Foreground = new SolidColorBrush(accent);
+            value.VerticalAlignment = VerticalAlignment.Center;
+            pill.Child = value;
+            panel.Children.Add(pill);
+
+            return panel;
+        }
+
+        private static string GetIconGlyph(string name)
+        {
+            DeviceIconKind kind = UiTheme.GetIconKind(name);
+            if (kind == DeviceIconKind.Keyboard)
+            {
+                return "\uE765";
+            }
+
+            if (kind == DeviceIconKind.Mouse)
+            {
+                return "\uE962";
+            }
+
+            if (kind == DeviceIconKind.Gamepad)
+            {
+                return "\uE7FC";
+            }
+
+            if (kind == DeviceIconKind.Headset)
+            {
+                return "\uE7F6";
+            }
+
+            return "\uE7C3";
+        }
+
+        private void OnOverlayMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            EventHandler handler = MenuRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+
+            e.Handled = true;
+        }
+
+        private static Color ToMediaColor(System.Drawing.Color color)
+        {
+            return Color.FromArgb(color.A, color.R, color.G, color.B);
+        }
+    }
+}
