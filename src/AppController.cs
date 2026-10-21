@@ -235,7 +235,9 @@ namespace PeripheralBattery
                 DeviceBattery item = snapshot;
                 Forms.ToolStripMenuItem deviceItem = new Forms.ToolStripMenuItem(UiTheme.GetDisplayName(item.Name));
                 deviceItem.Tag = item;
-                deviceItem.Checked = !_settings.HiddenIds.Contains(item.Id);
+                deviceItem.CheckState = _settings.HiddenIds.Contains(item.Id)
+                    ? Forms.CheckState.Unchecked
+                    : Forms.CheckState.Checked;
                 deviceItem.Click += delegate { ToggleDevice(item.Id); };
                 menu.Items.Add(deviceItem);
             }
@@ -261,7 +263,9 @@ namespace PeripheralBattery
             menu.Items.Add(new Forms.ToolStripSeparator());
 
             Forms.ToolStripMenuItem taskbarItem = new Forms.ToolStripMenuItem("在任务栏显示电量");
-            taskbarItem.Checked = _settings.ShowTaskbar;
+            taskbarItem.CheckState = _settings.ShowTaskbar
+                ? Forms.CheckState.Checked
+                : Forms.CheckState.Unchecked;
             taskbarItem.Click += delegate
             {
                 _settings.ShowTaskbar = !_settings.ShowTaskbar;
@@ -271,7 +275,9 @@ namespace PeripheralBattery
             menu.Items.Add(taskbarItem);
 
             Forms.ToolStripMenuItem autoStartItem = new Forms.ToolStripMenuItem("开机自动启动");
-            autoStartItem.Checked = AutoStart.IsEnabled();
+            autoStartItem.CheckState = AutoStart.IsEnabled()
+                ? Forms.CheckState.Checked
+                : Forms.CheckState.Unchecked;
             autoStartItem.Click += delegate { AutoStart.SetEnabled(!AutoStart.IsEnabled()); };
             menu.Items.Add(autoStartItem);
 
@@ -280,6 +286,8 @@ namespace PeripheralBattery
             Forms.ToolStripMenuItem exitItem = new Forms.ToolStripMenuItem("退出");
             exitItem.Click += delegate { Exit(); };
             menu.Items.Add(exitItem);
+
+            menu.PerformLayout();
         }
 
         private void BuildHidMenu(Forms.ToolStripMenuItem hidMenu)
