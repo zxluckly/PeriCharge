@@ -61,6 +61,31 @@ namespace PeripheralBattery
         [DllImport("user32.dll")]
         internal static extern bool GetCursorPos(out POINT lpPoint);
 
+        [DllImport("user32.dll")]
+        internal static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr GetParent(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        internal static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern uint RegisterWindowMessage(string lpString);
+
+        internal const int GWL_STYLE = -16;
+        internal const int WS_CHILD = 0x40000000;
+        internal const int WS_POPUP = unchecked((int)0x80000000);
+        internal const int WM_DISPLAYCHANGE = 0x007E;
+        internal const int WM_SETTINGCHANGE = 0x001A;
+        internal const uint SWP_NOZORDER = 0x0004;
+
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UpdateLayeredWindow(
             IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,

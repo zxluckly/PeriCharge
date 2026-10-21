@@ -55,7 +55,8 @@ build.bat
 
 ## 实现说明
 
-- 任务栏悬浮条参考 TaskbarLyrics：无边框、`WS_EX_NOACTIVATE`、TOPMOST 窗口，按 `Shell_TrayWnd` 实时矩形锚定到通知区域左侧；任务栏自动隐藏时一并隐藏
+- 任务栏悬浮条采用**嵌入模式**：`SetParent` 到 `Shell_TrayWnd`，作为任务栏子窗口，显示/隐藏、移动、重建都随任务栏自动同步，不使用独立 TOPMOST 窗口，也没有位置轮询
+- 背景与文字颜色跟随系统深浅色主题；任务栏自动隐藏或全屏时，子窗口随父窗口一并隐藏
 - 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值，带超时等待；**不会把系统缓存值当作实时电量**
 - DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report，按 `status & 0x0F` 解析电量档位（每档 10%）
 - 设备仅在成功读到实时电量后才显示数字；未连接设备显示「未连接」

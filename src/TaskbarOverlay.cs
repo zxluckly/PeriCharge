@@ -1,16 +1,15 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace PeripheralBattery
 {
     /// <summary>
-    /// 锚定在任务栏通知区域左侧的无边框悬浮条。
-    /// 使用分层窗口（WS_EX_LAYERED + UpdateLayeredWindow）实现真正的透明背景，
-    /// 颜色跟随系统深浅色主题。
+    /// 嵌入任务栏的悬浮条：SetParent 到 Shell_TrayWnd，作为任务栏的子窗口。
+    /// 显示/隐藏由父窗口状态同步，无需轮询定位。
     /// </summary>
     internal sealed class TaskbarOverlay : Form
     {
@@ -23,10 +22,11 @@ namespace PeripheralBattery
         private const int PillWidth = 52;
         private const int PillHeight = 18;
 
-        private readonly Timer _positionTimer;
+        private readonly uint _taskbarCreatedMessage;
         private DeviceBattery[] _items = new DeviceBattery[0];
         private string _emptyText = "正在扫描蓝牙设备…";
         private bool _enabled;
+        private bool _attached;
 
         internal event EventHandler MenuRequested;
 
@@ -35,16 +35,14 @@ namespace PeripheralBattery
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
-            TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            DoubleBuffered = true;
-            BackColor = Color.FromArgb(28, 28, 28);
+            BackColor = Color.FromArgb(40, 40, 40);
             Font = NameFont;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
 
-            _positionTimer = new Timer();
-            _positionTimer.Interval = 1000;
-            _positionTimer.Tick += delegate { Reposition(); };
+            _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+            SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         }
 
         protected override CreateParams CreateParams
@@ -53,8 +51,6 @@ namespace PeripheralBattery
             {
                 CreateParams cp = base.CreateParams;
                 cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
-                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
-                cp.ExStyle |= 0x00080000; // WS_EX_LAYERED
                 return cp;
             }
         }
@@ -62,11 +58,6 @@ namespace PeripheralBattery
         protected override bool ShowWithoutActivation
         {
             get { return true; }
-        }
-
-        protected override void OnPaintBackground(PaintEventArgs e)
-        {
-            // 分层窗口由 UpdateLayeredWindow 负责绘制
         }
 
         private float DpiScale
@@ -83,13 +74,11 @@ namespace PeripheralBattery
             _enabled = enabled;
             if (!enabled)
             {
-                _positionTimer.Stop();
                 Hide();
                 return;
             }
 
-            _positionTimer.Start();
-            Reposition();
+            AttachToTaskbar();
         }
 
         internal void SetItems(DeviceBattery[] items)
@@ -108,6 +97,94 @@ namespace PeripheralBattery
             }
         }
 
+        internal void RefreshPosition()
+        {
+            if (_enabled)
+            {
+                AttachToTaskbar();
+            }
+        }
+
+        private void AttachToTaskbar()
+        {
+            if (!_enabled)
+            {
+                return;
+            }
+
+            IntPtr taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
+            if (taskbar == IntPtr.Zero)
+            {
+                Hide();
+                return;
+            }
+
+            if (!IsHandleCreated)
+            {
+                CreateHandle();
+            }
+
+            if (NativeMethods.GetParent(Handle) != taskbar)
+            {
+                NativeMethods.SetParent(Handle, taskbar);
+                int style = NativeMethods.GetWindowLong(Handle, NativeMethods.GWL_STYLE);
+                style = (style & ~NativeMethods.WS_POPUP) | NativeMethods.WS_CHILD;
+                NativeMethods.SetWindowLong(Handle, NativeMethods.GWL_STYLE, style);
+                _attached = true;
+            }
+
+            Reposition();
+            if (!Visible)
+            {
+                Show();
+            }
+        }
+
+        private void Reposition()
+        {
+            if (!_enabled || !IsHandleCreated)
+            {
+                return;
+            }
+
+            IntPtr taskbar = NativeMethods.GetParent(Handle);
+            if (taskbar == IntPtr.Zero)
+            {
+                return;
+            }
+
+            NativeMethods.RECT trayRect;
+            if (!NativeMethods.GetWindowRect(taskbar, out trayRect))
+            {
+                return;
+            }
+
+            IntPtr notify = NativeMethods.FindWindowEx(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
+            int rightEdge = trayRect.Right - (int)Math.Round(220 * DpiScale);
+            if (notify != IntPtr.Zero)
+            {
+                NativeMethods.RECT notifyRect;
+                if (NativeMethods.GetWindowRect(notify, out notifyRect) && notifyRect.Left > trayRect.Left)
+                {
+                    rightEdge = notifyRect.Left - (int)Math.Round(8 * DpiScale);
+                }
+            }
+
+            NativeMethods.POINT point = new NativeMethods.POINT();
+            point.X = rightEdge - Width;
+            point.Y = trayRect.Top + (trayRect.Bottom - trayRect.Top - Height) / 2;
+            NativeMethods.ScreenToClient(taskbar, ref point);
+
+            NativeMethods.SetWindowPos(
+                Handle,
+                IntPtr.Zero,
+                point.X,
+                point.Y,
+                Width,
+                Height,
+                NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+        }
+
         private void RefreshLayout()
         {
             float scale = DpiScale;
@@ -116,7 +193,7 @@ namespace PeripheralBattery
             int width;
             int height = Math.Max((int)Math.Round(34 * scale), (int)Math.Round(24 * scale));
 
-            using (Bitmap measureBitmap = new Bitmap(1, 1, PixelFormat.Format32bppArgb))
+            using (Bitmap measureBitmap = new Bitmap(1, 1))
             using (Graphics graphics = Graphics.FromImage(measureBitmap))
             {
                 if (_items.Length == 0)
@@ -137,8 +214,12 @@ namespace PeripheralBattery
                 Height = height;
             }
 
+            if (_enabled)
+            {
+                Reposition();
+            }
+
             Invalidate();
-            RenderLayered();
         }
 
         private int ComputeRequiredWidth(Graphics graphics, float scale, int padding, int gap)
@@ -171,162 +252,125 @@ namespace PeripheralBattery
             return iconSize + iconGap + nameWidth + nameGap + pillWidth;
         }
 
-        private void Reposition()
+        protected override void WndProc(ref Message m)
         {
-            if (!_enabled)
+            if (m.Msg == (int)_taskbarCreatedMessage
+                || m.Msg == NativeMethods.WM_DISPLAYCHANGE
+                || m.Msg == NativeMethods.WM_SETTINGCHANGE)
             {
-                return;
-            }
-
-            IntPtr taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
-            if (taskbar == IntPtr.Zero)
-            {
-                Hide();
-                return;
-            }
-
-            NativeMethods.RECT bar;
-            if (!NativeMethods.GetWindowRect(taskbar, out bar))
-            {
-                Hide();
-                return;
-            }
-
-            int barWidth = bar.Right - bar.Left;
-            int barHeight = bar.Bottom - bar.Top;
-            int screenHeight = Screen.PrimaryScreen.Bounds.Height;
-
-            // 任务栏不显示时（自动隐藏、全屏应用遮挡、移出屏幕）一并隐藏
-            bool taskbarHidden = !NativeMethods.IsWindowVisible(taskbar)
-                || barWidth <= 0
-                || barHeight < 20
-                || bar.Top >= screenHeight
-                || bar.Bottom <= 0;
-
-            if (!taskbarHidden)
-            {
-                NativeMethods.APPBARDATA appBar = new NativeMethods.APPBARDATA();
-                appBar.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(appBar);
-                uint state = NativeMethods.SHAppBarMessage(NativeMethods.ABM_GETSTATE, ref appBar);
-                bool autoHide = (state & NativeMethods.ABS_AUTOHIDE) != 0;
-                if (autoHide)
+                if (_enabled)
                 {
-                    NativeMethods.POINT cursor;
-                    if (NativeMethods.GetCursorPos(out cursor))
+                    BeginInvoke(new Action(AttachToTaskbar));
+                }
+            }
+
+            base.WndProc(ref m);
+        }
+
+        private void OnDisplaySettingsChanged(object sender, EventArgs e)
+        {
+            if (_enabled && IsHandleCreated)
+            {
+                BeginInvoke(new Action(AttachToTaskbar));
+            }
+        }
+
+        private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            if (e.Category == UserPreferenceCategory.General || e.Category == UserPreferenceCategory.Color)
+            {
+                Theme.Invalidate();
+                if (_enabled && IsHandleCreated)
+                {
+                    BeginInvoke(new Action(delegate
                     {
-                        // 底部任务栏自动隐藏时，鼠标不在底部区域就视为任务栏已隐藏
-                        if (cursor.Y < bar.Top - 2)
-                        {
-                            taskbarHidden = true;
-                        }
-                    }
+                        AttachToTaskbar();
+                        Invalidate();
+                    }));
                 }
             }
-
-            if (taskbarHidden)
-            {
-                Hide();
-                return;
-            }
-
-            int rightEdge = bar.Right - (int)Math.Round(8 * DpiScale);
-            IntPtr tray = NativeMethods.FindWindowEx(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
-            if (tray != IntPtr.Zero)
-            {
-                NativeMethods.RECT trayRect;
-                if (NativeMethods.GetWindowRect(tray, out trayRect) && trayRect.Left > bar.Left)
-                {
-                    rightEdge = trayRect.Left - (int)Math.Round(10 * DpiScale);
-                }
-            }
-            else
-            {
-                rightEdge = bar.Right - (int)Math.Round(220 * DpiScale);
-            }
-
-            int x = rightEdge - Width;
-            int y = bar.Top + (barHeight - Height) / 2;
-            if (x < bar.Left)
-            {
-                x = bar.Left + (int)Math.Round(8 * DpiScale);
-            }
-
-            if (Location.X != x || Location.Y != y)
-            {
-                Location = new Point(x, y);
-                Invalidate();
-            }
-
-            if (!Visible)
-            {
-                Show();
-                Invalidate();
-                RenderLayered();
-            }
-
-            NativeMethods.SetWindowPos(
-                Handle,
-                NativeMethods.HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            RenderLayered();
-        }
 
-        private void RenderLayered()
-        {
-            if (!IsHandleCreated || Width <= 0 || Height <= 0)
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+            float scale = DpiScale;
+            int padding = (int)Math.Round(14 * scale);
+            int gap = (int)Math.Round(14 * scale);
+
+            if (_items.Length > 0)
             {
+                int required = ComputeRequiredWidth(g, scale, padding, gap);
+                if (required > Width)
+                {
+                    Width = required;
+                    Reposition();
+                    return;
+                }
+            }
+
+            DrawBackground(g, scale);
+
+            if (_items.Length == 0)
+            {
+                DrawEmpty(g, padding);
                 return;
             }
 
-            int width = Math.Max(1, Width);
-            int height = Math.Max(1, Height);
-            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            DrawContent(g, scale, padding, gap);
+        }
+
+        private void DrawBackground(Graphics g, float scale)
+        {
+            Color background = Theme.IsLight() ? Color.FromArgb(250, 250, 250) : Color.FromArgb(40, 40, 40);
+            if (BackColor != background)
             {
-                using (Graphics g = Graphics.FromImage(bitmap))
+                BackColor = background;
+            }
+
+            Rectangle full = new Rectangle(0, 0, Width, Height);
+            int radius = (int)Math.Round(8 * scale);
+
+            using (GraphicsPath path = UiTheme.RoundedRect(full, radius))
+            {
+                using (SolidBrush brush = new SolidBrush(background))
                 {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                    g.Clear(Color.Transparent);
-
-                    float scale = DpiScale;
-                    int padding = (int)Math.Round(14 * scale);
-                    int gap = (int)Math.Round(14 * scale);
-
-                    if (_items.Length > 0)
-                    {
-                        int required = ComputeRequiredWidth(g, scale, padding, gap);
-                        if (required > Width)
-                        {
-                            Width = required;
-                            RenderLayered();
-                            return;
-                        }
-
-                        DrawContent(g, scale, padding, gap);
-                    }
-                    else
-                    {
-                        DrawEmpty(g, scale, padding);
-                    }
+                    g.FillPath(brush, path);
                 }
 
-                NativeMethods.SetLayeredBitmap(Handle, bitmap, Location);
+                using (Pen border = new Pen(UiTheme.Border, 1f))
+                {
+                    g.DrawPath(border, path);
+                }
+            }
+        }
+
+        private void DrawEmpty(Graphics g, int padding)
+        {
+            using (StringFormat format = new StringFormat())
+            {
+                format.LineAlignment = StringAlignment.Center;
+                format.Trimming = StringTrimming.EllipsisCharacter;
+                format.FormatFlags = StringFormatFlags.NoWrap;
+                using (SolidBrush brush = new SolidBrush(UiTheme.TextSecondary))
+                {
+                    g.DrawString(
+                        _emptyText,
+                        EmptyFont,
+                        brush,
+                        new RectangleF(padding, 0, Width - padding * 2, Height),
+                        format);
+                }
             }
         }
 
         private void DrawContent(Graphics g, float scale, int padding, int gap)
         {
-            DrawBackground(g, scale);
-
             int iconSize = (int)Math.Round(IconSize * scale);
             int iconGap = (int)Math.Round(6 * scale);
             int nameGap = (int)Math.Round(8 * scale);
@@ -387,58 +431,6 @@ namespace PeripheralBattery
             }
         }
 
-        private void DrawEmpty(Graphics g, float scale, int padding)
-        {
-            DrawBackground(g, scale);
-
-            using (StringFormat format = new StringFormat())
-            {
-                format.LineAlignment = StringAlignment.Center;
-                format.Trimming = StringTrimming.EllipsisCharacter;
-                format.FormatFlags = StringFormatFlags.NoWrap;
-                using (SolidBrush brush = new SolidBrush(UiTheme.TextSecondary))
-                {
-                    g.DrawString(
-                        _emptyText,
-                        EmptyFont,
-                        brush,
-                        new RectangleF(padding, 0, Width - padding * 2, Height),
-                        format);
-                }
-            }
-        }
-
-        private void DrawBackground(Graphics g, float scale)
-        {
-            Rectangle full = new Rectangle(0, 0, Width, Height);
-            int radius = (int)Math.Round(9 * scale);
-            int alpha = Theme.IsLight() ? 238 : 232;
-
-            using (GraphicsPath path = UiTheme.RoundedRect(full, radius))
-            {
-                Color top = UiTheme.BackgroundTop;
-                Color bottom = UiTheme.BackgroundBottom;
-                using (LinearGradientBrush background = new LinearGradientBrush(
-                    full,
-                    Color.FromArgb(alpha, top),
-                    Color.FromArgb(alpha, bottom),
-                    LinearGradientMode.Vertical))
-                {
-                    g.FillPath(background, path);
-                }
-
-                using (Pen border = new Pen(UiTheme.Border, 1f))
-                {
-                    g.DrawPath(border, path);
-                }
-            }
-
-            using (Pen highlight = new Pen(UiTheme.Highlight, 1f))
-            {
-                g.DrawLine(highlight, radius, 1, Width - radius - 1, 1);
-            }
-        }
-
         private static void DrawPill(Graphics g, Rectangle rect, DeviceBattery item)
         {
             bool online = item.Online;
@@ -446,12 +438,12 @@ namespace PeripheralBattery
 
             using (GraphicsPath path = UiTheme.RoundedRect(rect, rect.Height / 2))
             {
-                using (SolidBrush fill = new SolidBrush(Color.FromArgb(online ? 38 : 20, accent)))
+                using (SolidBrush fill = new SolidBrush(Color.FromArgb(online ? 30 : 16, accent)))
                 {
                     g.FillPath(fill, path);
                 }
 
-                using (Pen border = new Pen(Color.FromArgb(online ? 96 : 46, accent), 1f))
+                using (Pen border = new Pen(Color.FromArgb(online ? 80 : 36, accent), 1f))
                 {
                     g.DrawPath(border, path);
                 }
@@ -480,6 +472,22 @@ namespace PeripheralBattery
                     handler(this, EventArgs.Empty);
                 }
             }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+                if (_attached && IsHandleCreated)
+                {
+                    NativeMethods.SetParent(Handle, IntPtr.Zero);
+                    _attached = false;
+                }
+            }
+
+            base.Dispose(disposing);
         }
     }
 }
