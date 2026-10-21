@@ -18,6 +18,9 @@ namespace PeripheralBattery
         private readonly StackPanel _content;
         private readonly Border _refreshButton;
         private readonly TextBlock _refreshGlyph;
+        private readonly SolidColorBrush _buttonHoverBrush;
+        private readonly ScaleTransform _buttonScale;
+        private readonly RotateTransform _glyphRotate;
         private readonly LinearGradientBrush _backgroundBrush;
         private readonly SolidColorBrush _borderBrush;
         private readonly uint _taskbarCreatedMessage;
@@ -75,16 +78,51 @@ namespace PeripheralBattery
             _refreshButton.Margin = new Thickness(8, 0, 0, 0);
             _refreshButton.Cursor = System.Windows.Input.Cursors.Hand;
             _refreshButton.Visibility = Visibility.Collapsed;
+            _refreshButton.RenderTransformOrigin = new Point(0.5, 0.5);
+            _buttonScale = new ScaleTransform(1, 1);
+            _refreshButton.RenderTransform = _buttonScale;
+
             _refreshGlyph = new TextBlock();
             _refreshGlyph.Text = "\uE72C";
             _refreshGlyph.FontFamily = new FontFamily("Segoe MDL2 Assets");
             _refreshGlyph.FontSize = 12;
             _refreshGlyph.HorizontalAlignment = HorizontalAlignment.Center;
             _refreshGlyph.VerticalAlignment = VerticalAlignment.Center;
-            _refreshButton.Child = _refreshGlyph;
+            _refreshGlyph.RenderTransformOrigin = new Point(0.5, 0.5);
+            _glyphRotate = new RotateTransform(0);
+            _refreshGlyph.RenderTransform = _glyphRotate;
+
+            _buttonHoverBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255));
+            _buttonHoverBrush.Opacity = 0;
+            Border hoverLayer = new Border();
+            hoverLayer.CornerRadius = new CornerRadius(11);
+            hoverLayer.Background = _buttonHoverBrush;
+
+            Grid buttonGrid = new Grid();
+            buttonGrid.Children.Add(hoverLayer);
+            buttonGrid.Children.Add(_refreshGlyph);
+            _refreshButton.Child = buttonGrid;
+
+            _refreshButton.MouseEnter += delegate
+            {
+                AnimateBrush(_buttonHoverBrush, 1.0, 120);
+            };
+            _refreshButton.MouseLeave += delegate
+            {
+                AnimateBrush(_buttonHoverBrush, 0.0, 150);
+                AnimateScale(1.0, 120);
+            };
+            _refreshButton.MouseLeftButtonDown += delegate(object sender, System.Windows.Input.MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                AnimateScale(0.86, 80);
+            };
             _refreshButton.MouseLeftButtonUp += delegate(object sender, System.Windows.Input.MouseButtonEventArgs e)
             {
                 e.Handled = true;
+                AnimateScale(1.0, 120);
+                AnimateGlyphRotation();
+
                 EventHandler handler = RefreshRequested;
                 if (handler != null)
                 {
@@ -286,6 +324,33 @@ namespace PeripheralBattery
             _borderBrush.BeginAnimation(Brush.OpacityProperty, animation);
         }
 
+        private void AnimateBrush(SolidColorBrush brush, double target, int milliseconds)
+        {
+            DoubleAnimation animation = new DoubleAnimation(
+                target, new Duration(TimeSpan.FromMilliseconds(milliseconds)));
+            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+            brush.BeginAnimation(Brush.OpacityProperty, animation);
+        }
+
+        private void AnimateScale(double target, int milliseconds)
+        {
+            DoubleAnimation animation = new DoubleAnimation(
+                target, new Duration(TimeSpan.FromMilliseconds(milliseconds)));
+            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+            _buttonScale.BeginAnimation(ScaleTransform.ScaleXProperty, animation);
+            _buttonScale.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
+        }
+
+        private void AnimateGlyphRotation()
+        {
+            _glyphRotate.BeginAnimation(RotateTransform.AngleProperty, null);
+            _glyphRotate.Angle = 0;
+            DoubleAnimation animation = new DoubleAnimation(
+                360.0, new Duration(TimeSpan.FromMilliseconds(320)));
+            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+            _glyphRotate.BeginAnimation(RotateTransform.AngleProperty, animation);
+        }
+
         private void ApplyTheme()
         {
             bool light = Theme.IsLight();
@@ -302,6 +367,7 @@ namespace PeripheralBattery
             _borderBrush.Color = ToMediaColor(UiTheme.Border);
 
             Color text = ToMediaColor(UiTheme.TextPrimary);
+            _buttonHoverBrush.Color = Color.FromArgb(60, text.R, text.G, text.B);
             _refreshButton.Background = new SolidColorBrush(Color.FromArgb(30, text.R, text.G, text.B));
             _refreshButton.BorderBrush = new SolidColorBrush(Color.FromArgb(60, text.R, text.G, text.B));
             _refreshButton.BorderThickness = new Thickness(1);

@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 
@@ -24,6 +25,7 @@ namespace PeripheralBattery
         private volatile bool _refreshing;
         private bool _exiting;
         private string _lastHidSignature = string.Empty;
+        private ContextMenu _openMenu;
 
         internal AppController(System.Windows.Application app)
         {
@@ -159,15 +161,27 @@ namespace PeripheralBattery
 
         private void OnTrayClick(object sender, Forms.MouseEventArgs e)
         {
-            if (e.Button == Forms.MouseButtons.Left || e.Button == Forms.MouseButtons.Right)
+            if (e.Button == Forms.MouseButtons.Right)
             {
                 ShowMenu();
+            }
+            else if (e.Button == Forms.MouseButtons.Left)
+            {
+                StartRefresh();
             }
         }
 
         private void ShowMenu()
         {
+            ApplyMenuTheme();
+
+            if (_openMenu != null && _openMenu.IsOpen)
+            {
+                _openMenu.IsOpen = false;
+            }
+
             ContextMenu menu = new ContextMenu();
+            menu.StaysOpen = false;
 
             MenuItem title = new MenuItem();
             title.Header = "外设电量";
@@ -244,9 +258,130 @@ namespace PeripheralBattery
             exitItem.Click += delegate { Exit(); };
             menu.Items.Add(exitItem);
 
-            menu.PlacementTarget = _overlay;
+            menu.PlacementTarget = null;
             menu.Placement = PlacementMode.MousePoint;
+            _openMenu = menu;
+            menu.Closed += delegate
+            {
+                if (ReferenceEquals(_openMenu, menu))
+                {
+                    _openMenu = null;
+                }
+            };
             menu.IsOpen = true;
+        }
+
+        private void ApplyMenuTheme()
+        {
+            bool light = Theme.IsLight();
+            string background = light ? "#F7F7F7" : "#202020";
+            string foreground = light ? "#1B1B1B" : "#F2F2F2";
+            string hover = light ? "#E4E4E4" : "#3C3C3C";
+            string border = light ? "#C8C8C8" : "#424242";
+            string check = light ? "#1E8E3E" : "#70DE8E";
+            string disabled = light ? "#9A9A9A" : "#6C6C6C";
+
+            string menuXaml = @"
+<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+       TargetType='{x:Type ContextMenu}'>
+  <Setter Property='Background' Value='__BG__'/>
+  <Setter Property='Foreground' Value='__FG__'/>
+  <Setter Property='BorderBrush' Value='__BORDER__'/>
+  <Setter Property='BorderThickness' Value='1'/>
+  <Setter Property='Padding' Value='6'/>
+  <Setter Property='Template'>
+    <Setter.Value>
+      <ControlTemplate TargetType='{x:Type ContextMenu}'>
+        <Border Background='{TemplateBinding Background}'
+                BorderBrush='{TemplateBinding BorderBrush}'
+                BorderThickness='{TemplateBinding BorderThickness}'
+                CornerRadius='9'
+                Padding='{TemplateBinding Padding}'>
+          <StackPanel IsItemsHost='True'/>
+        </Border>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            string itemXaml = @"
+<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+       TargetType='{x:Type MenuItem}'>
+  <Setter Property='Foreground' Value='__FG__'/>
+  <Setter Property='Padding' Value='10,6'/>
+  <Setter Property='Template'>
+    <Setter.Value>
+      <ControlTemplate TargetType='{x:Type MenuItem}'>
+        <Border x:Name='Bd' Background='Transparent' CornerRadius='5' Padding='{TemplateBinding Padding}'>
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width='18'/>
+              <ColumnDefinition Width='*'/>
+              <ColumnDefinition Width='Auto'/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name='Check' Grid.Column='0' Text='&#x2713;' Foreground='__CHECK__' Visibility='Collapsed' VerticalAlignment='Center' HorizontalAlignment='Center'/>
+            <ContentPresenter Grid.Column='1' ContentSource='Header' VerticalAlignment='Center' RecognizesAccessKey='True'/>
+            <TextBlock x:Name='Arrow' Grid.Column='2' Text='&#x25B8;' Margin='10,0,0,0' Visibility='Collapsed' Foreground='__FG__'/>
+            <Popup x:Name='PART_Popup' Placement='Right' IsOpen='{TemplateBinding IsSubmenuOpen}'
+                   PlacementTarget='{Binding RelativeSource={RelativeSource TemplatedParent}}'
+                   AllowsTransparency='True' Focusable='False' PopupAnimation='Fade'>
+              <Border Background='__BG__' BorderBrush='__BORDER__' BorderThickness='1' CornerRadius='9' Padding='6'>
+                <StackPanel IsItemsHost='True'/>
+              </Border>
+            </Popup>
+          </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property='IsHighlighted' Value='True'>
+            <Setter TargetName='Bd' Property='Background' Value='__HOVER__'/>
+          </Trigger>
+          <Trigger Property='IsChecked' Value='True'>
+            <Setter TargetName='Check' Property='Visibility' Value='Visible'/>
+          </Trigger>
+          <Trigger Property='Role' Value='SubmenuHeader'>
+            <Setter TargetName='Arrow' Property='Visibility' Value='Visible'/>
+          </Trigger>
+          <Trigger Property='IsEnabled' Value='False'>
+            <Setter Property='Foreground' Value='__DISABLED__'/>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            string separatorXaml = @"
+<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+       TargetType='{x:Type Separator}'>
+  <Setter Property='Template'>
+    <Setter.Value>
+      <ControlTemplate TargetType='{x:Type Separator}'>
+        <Border Height='1' Background='__BORDER__' Margin='10,4'/>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
+            try
+            {
+                menuXaml = menuXaml.Replace("__BG__", background).Replace("__FG__", foreground)
+                    .Replace("__BORDER__", border);
+                itemXaml = itemXaml.Replace("__BG__", background).Replace("__FG__", foreground)
+                    .Replace("__BORDER__", border).Replace("__HOVER__", hover)
+                    .Replace("__CHECK__", check).Replace("__DISABLED__", disabled);
+                separatorXaml = separatorXaml.Replace("__BORDER__", border);
+
+                Application.Current.Resources[typeof(ContextMenu)] = XamlReader.Parse(menuXaml);
+                Application.Current.Resources[typeof(MenuItem)] = XamlReader.Parse(itemXaml);
+                Application.Current.Resources[typeof(Separator)] = XamlReader.Parse(separatorXaml);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("应用菜单样式失败", ex);
+            }
         }
 
         private void BuildHidMenu(MenuItem hidMenu)
