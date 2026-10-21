@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace PeripheralBattery
@@ -17,6 +18,8 @@ namespace PeripheralBattery
         private readonly StackPanel _content;
         private readonly Border _refreshButton;
         private readonly TextBlock _refreshGlyph;
+        private readonly LinearGradientBrush _backgroundBrush;
+        private readonly SolidColorBrush _borderBrush;
         private readonly uint _taskbarCreatedMessage;
 
         private DeviceBattery[] _items = new DeviceBattery[0];
@@ -45,7 +48,20 @@ namespace PeripheralBattery
             _root.BorderThickness = new Thickness(1);
             _root.Padding = new Thickness(14, 0, 14, 0);
             _root.MinHeight = 34;
-            _root.Background = Brushes.Transparent;
+
+            _backgroundBrush = new LinearGradientBrush();
+            _backgroundBrush.StartPoint = new Point(0, 0);
+            _backgroundBrush.EndPoint = new Point(0, 1);
+            _backgroundBrush.GradientStops.Add(new GradientStop(Colors.Transparent, 0));
+            _backgroundBrush.GradientStops.Add(new GradientStop(Colors.Transparent, 1));
+            // alpha 不能为 0：分层窗口在完全透明区域不接收鼠标，保留 1/255 以便悬停命中
+            _backgroundBrush.Opacity = 1.0 / 255.0;
+
+            _borderBrush = new SolidColorBrush(Colors.Transparent);
+            _borderBrush.Opacity = 1.0 / 255.0;
+
+            _root.Background = _backgroundBrush;
+            _root.BorderBrush = _borderBrush;
 
             DockPanel dock = new DockPanel();
             _content = new StackPanel();
@@ -241,7 +257,7 @@ namespace PeripheralBattery
                 clientPoint.Y,
                 width,
                 height,
-                NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
         }
 
         private void SetHovered(bool hovered)
@@ -254,22 +270,36 @@ namespace PeripheralBattery
             _hovered = hovered;
             _refreshButton.Visibility = hovered ? Visibility.Visible : Visibility.Collapsed;
             ApplyTheme();
+            AnimateBackground(hovered);
             UpdateLayout();
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+        }
+
+        private void AnimateBackground(bool visible)
+        {
+            DoubleAnimation animation = new DoubleAnimation(
+                visible ? 1.0 : 1.0 / 255.0,
+                new Duration(TimeSpan.FromMilliseconds(170)));
+            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+
+            _backgroundBrush.BeginAnimation(Brush.OpacityProperty, animation);
+            _borderBrush.BeginAnimation(Brush.OpacityProperty, animation);
         }
 
         private void ApplyTheme()
         {
             bool light = Theme.IsLight();
-            int alpha = _hovered ? (light ? 250 : 244) : (light ? 238 : 228);
+            int alpha = light ? 246 : 240;
 
             Color top = ToMediaColor(UiTheme.BackgroundTop);
             Color bottom = ToMediaColor(UiTheme.BackgroundBottom);
-            _root.Background = new LinearGradientBrush(
-                Color.FromArgb((byte)alpha, top.R, top.G, top.B),
-                Color.FromArgb((byte)alpha, bottom.R, bottom.G, bottom.B),
-                90);
-            _root.BorderBrush = new SolidColorBrush(ToMediaColor(UiTheme.Border));
+            if (_backgroundBrush.GradientStops.Count >= 2)
+            {
+                _backgroundBrush.GradientStops[0].Color = Color.FromArgb((byte)alpha, top.R, top.G, top.B);
+                _backgroundBrush.GradientStops[1].Color = Color.FromArgb((byte)alpha, bottom.R, bottom.G, bottom.B);
+            }
+
+            _borderBrush.Color = ToMediaColor(UiTheme.Border);
 
             Color text = ToMediaColor(UiTheme.TextPrimary);
             _refreshButton.Background = new SolidColorBrush(Color.FromArgb(30, text.R, text.G, text.B));
