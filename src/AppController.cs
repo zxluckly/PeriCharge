@@ -172,6 +172,7 @@ namespace PeripheralBattery
             menu.Renderer = new DarkMenuRenderer();
             menu.Font = new Font("Segoe UI", 9f);
             menu.ShowImageMargin = false;
+            menu.ShowCheckMargin = true;
             menu.DropShadowEnabled = false;
             menu.Opening += delegate { PopulateMenu(menu); };
             menu.Opened += delegate { ApplyMenuRegion(menu); };
@@ -210,6 +211,8 @@ namespace PeripheralBattery
             menu.BackColor = UiTheme.MenuBackground;
             menu.ForeColor = UiTheme.TextPrimary;
             menu.Font = new Font("Segoe UI", 9f);
+            menu.ShowCheckMargin = true;
+            menu.ShowImageMargin = false;
             menu.Padding = new Forms.Padding(4);
             menu.Items.Clear();
 
