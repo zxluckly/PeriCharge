@@ -32,7 +32,6 @@ namespace PeripheralBattery
 
             _overlay = new WpfOverlay();
             _overlay.RefreshRequested += delegate { StartRefresh(); };
-
             _menu = BuildMenu();
 
             _tray = new Forms.NotifyIcon();
@@ -49,6 +48,13 @@ namespace PeripheralBattery
 
             Log.Write("程序启动");
             StartRefresh();
+
+            // WPF 消息循环尚未启动时窗口 Show 不完整，延迟到应用空闲再应用初始显示状态
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(
+                DispatcherPriority.ApplicationIdle, new Action(delegate
+            {
+                _overlay.SetEnabled(_settings.ShowTaskbar);
+            }));
         }
 
         private void OnTick(object sender, EventArgs e)
