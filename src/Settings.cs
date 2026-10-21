@@ -7,7 +7,7 @@ namespace PeripheralBattery
     internal sealed class Settings
     {
         public bool ShowTaskbar = true;
-        public int RefreshSeconds = 60;
+        public int RefreshSeconds = 30;
         public readonly List<string> HiddenIds = new List<string>();
 
         private static string FolderPath

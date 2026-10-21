@@ -17,6 +17,7 @@ namespace PeripheralBattery
         public int Percent { get; set; }
         public bool Online { get; set; }
         public bool Supported { get; set; }
+        public bool Charging { get; set; }
         public DateTime UpdatedAt { get; set; }
         public string Error { get; set; }
 
@@ -36,6 +37,7 @@ namespace PeripheralBattery
             copy.Percent = Percent;
             copy.Online = Online;
             copy.Supported = Supported;
+            copy.Charging = Charging;
             copy.UpdatedAt = UpdatedAt;
             copy.Error = Error;
             return copy;

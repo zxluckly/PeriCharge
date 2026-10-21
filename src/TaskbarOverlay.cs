@@ -133,8 +133,13 @@ namespace PeripheralBattery
             float scale = DpiScale;
             // GDI 测量值比实际绘制偏窄，按比例补偿
             int nameWidth = (int)Math.Round(TextRenderer.MeasureText(item.Name, Font).Width * 1.15);
-            int percentWidth = TextRenderer.MeasureText("100%", Font).Width;
+            int percentWidth = (int)Math.Round(TextRenderer.MeasureText(GetStateText(item), Font).Width * 1.15);
             return nameWidth + (int)Math.Round(6 * scale) + percentWidth;
+        }
+
+        private static string GetStateText(DeviceBattery item)
+        {
+            return item.Online ? item.Percent + "%" : "未连接";
         }
 
         private void Reposition()
@@ -255,7 +260,7 @@ namespace PeripheralBattery
                 TextRenderer.DrawText(g, name, Font, new Point(x, textY), nameColor);
                 x += TextRenderer.MeasureText(name, Font).Width + (int)Math.Round(6 * scale);
 
-                string percentText = item.Online ? item.Percent + "%" : "--";
+                string percentText = GetStateText(item);
                 Color percentColor = item.Online
                     ? IconFactory.ColorFor(item.Percent)
                     : Color.FromArgb(140, 140, 140);

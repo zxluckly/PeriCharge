@@ -107,15 +107,15 @@ namespace PeripheralBattery
         private void UpdateTrayIcon(DeviceBattery[] items)
         {
             int minimum = -1;
-            bool anyData = false;
+            bool anyOnline = false;
             foreach (DeviceBattery item in items)
             {
-                if (!item.Supported)
+                if (!item.Online)
                 {
                     continue;
                 }
 
-                anyData = true;
+                anyOnline = true;
                 if (item.Percent >= 0 && (minimum < 0 || item.Percent < minimum))
                 {
                     minimum = item.Percent;
@@ -128,7 +128,7 @@ namespace PeripheralBattery
             }
 
             Icon previous = _tray.Icon;
-            _tray.Icon = IconFactory.Create(minimum, anyData);
+            _tray.Icon = IconFactory.Create(minimum, anyOnline);
             if (previous != null)
             {
                 previous.Dispose();
@@ -153,7 +153,7 @@ namespace PeripheralBattery
             List<string> parts = new List<string>();
             foreach (DeviceBattery item in items)
             {
-                parts.Add(item.Name + " " + (item.Online ? item.Percent + "%" : "--"));
+                parts.Add(item.Name + " " + (item.Online ? item.Percent + "%" : "未连接"));
             }
 
             return "外设电量：" + string.Join("，", parts.ToArray());
@@ -197,7 +197,7 @@ namespace PeripheralBattery
             foreach (DeviceBattery snapshot in all)
             {
                 DeviceBattery item = snapshot;
-                string stateText = item.Online ? item.Percent + "%" : "离线";
+                string stateText = item.Online ? item.Percent + "%" : "未连接";
                 string text = item.Name + "    " + stateText;
                 ToolStripMenuItem deviceItem = new ToolStripMenuItem(text, null, delegate
                 {

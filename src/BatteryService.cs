@@ -105,6 +105,8 @@ namespace PeripheralBattery
                     await UpdateDeviceAsync(info).ConfigureAwait(false);
                 }
 
+                await UpdateHidDevicesAsync().ConfigureAwait(false);
+
                 if (fullScan)
                 {
                     _scanAll = false;
@@ -117,18 +119,70 @@ namespace PeripheralBattery
             }
         }
 
+        private async Task UpdateHidDevicesAsync()
+        {
+            List<DeviceBattery> hidDevices = await Task.Run(delegate
+            {
+                return HidBatteryService.ReadAll();
+            }).ConfigureAwait(false);
+
+            lock (_lock)
+            {
+                foreach (DeviceBattery item in hidDevices)
+                {
+                    _devices[item.Id] = item;
+                }
+
+                // 本次未枚举到的 HID 设备视为已断开
+                List<string> stale = new List<string>();
+                foreach (string key in _devices.Keys)
+                {
+                    if (!key.StartsWith("hid:", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    bool found = false;
+                    foreach (DeviceBattery item in hidDevices)
+                    {
+                        if (item.Id == key)
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found)
+                    {
+                        stale.Add(key);
+                    }
+                }
+
+                foreach (string key in stale)
+                {
+                    _devices.Remove(key);
+                }
+            }
+        }
+
         private async Task UpdateDeviceAsync(DeviceInformation info)
         {
-            ReadResult result = await ReadBatteryPercentAsync(info.Id).ConfigureAwait(false);
+                ReadResult result = await ReadBatteryPercentAsync(info.Id).ConfigureAwait(false);
 
             lock (_lock)
             {
                 bool known = _supported.Contains(info.Id);
-                if (result.Percent < 0 && !known)
+                if (result.Percent < 0 && !known && !result.HasBatteryService)
                 {
-                    // 从未成功读到电量的设备（手机、平板等）不进入列表
+                    // 没有电池服务的设备（手机、平板等）不进入列表
                     Log.Write("跳过设备 " + info.Name + "：" + result.Error);
                     return;
+                }
+
+                // 有电池服务的设备即使当前未连接也保留在列表中，后续刷新继续尝试
+                if (result.HasBatteryService)
+                {
+                    _supported.Add(info.Id);
                 }
 
                 DeviceBattery item;
@@ -163,6 +217,7 @@ namespace PeripheralBattery
         {
             public int Percent;
             public string Error;
+            public bool HasBatteryService;
         }
 
         private static async Task<ReadResult> ReadBatteryPercentAsync(string deviceId)
@@ -192,9 +247,9 @@ namespace PeripheralBattery
                     return result;
                 }
 
-                // 先用缓存模式拿服务/特征列表：未连接的设备也能返回，避免 Unreachable
+                // 用缓存服务列表快速找到电池服务（未连接设备也能返回），但读值必须走 Uncached
                 GattDeviceServicesResult services = await AwaitAsync(
-                    device.GetGattServicesAsync(), 10000).ConfigureAwait(false);
+                    device.GetGattServicesAsync(), 8000).ConfigureAwait(false);
 
                 if (services.Status != GattCommunicationStatus.Success)
                 {
@@ -218,8 +273,10 @@ namespace PeripheralBattery
                     return result;
                 }
 
+                result.HasBatteryService = true;
+
                 GattCharacteristicsResult characteristics = await AwaitAsync(
-                    batteryService.GetCharacteristicsAsync(), 8000).ConfigureAwait(false);
+                    batteryService.GetCharacteristicsAsync(), 5000).ConfigureAwait(false);
 
                 if (characteristics.Status != GattCommunicationStatus.Success)
                 {
@@ -243,19 +300,16 @@ namespace PeripheralBattery
                     return result;
                 }
 
-                // 先读实时值；设备休眠导致连接失败时退回缓存值
+                // 只认实时值：未连接/休眠的设备会返回 Unreachable，此时标记离线，
+                // 绝不回退到 Cached（缓存值可能是几天前的历史数据）。
                 GattReadResult read = await AwaitAsync(
-                    batteryLevel.ReadValueAsync(BluetoothCacheMode.Uncached), 10000).ConfigureAwait(false);
+                    batteryLevel.ReadValueAsync(BluetoothCacheMode.Uncached), 8000).ConfigureAwait(false);
 
                 if (read.Status != GattCommunicationStatus.Success)
                 {
-                    read = await AwaitAsync(
-                        batteryLevel.ReadValueAsync(BluetoothCacheMode.Cached), 5000).ConfigureAwait(false);
-                }
-
-                if (read.Status != GattCommunicationStatus.Success)
-                {
-                    result.Error = "电量读取失败：" + read.Status;
+                    result.Error = device.ConnectionStatus == BluetoothConnectionStatus.Disconnected
+                        ? "设备未连接（" + read.Status + "）"
+                        : "电量读取失败：" + read.Status;
                     return result;
                 }
 

@@ -123,6 +123,88 @@ namespace PeripheralBattery
         [DllImport("hid.dll")]
         private static extern int HidP_GetCaps(IntPtr preparsedData, ref HIDP_CAPS capabilities);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool ReadFile(
+            IntPtr hFile, byte[] buffer, uint numberOfBytesToRead, out uint numberOfBytesRead, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CancelIoEx(IntPtr hFile, IntPtr overlapped);
+
+        /// <summary>
+        /// 读取一条 HID 输入报告。设备持续上报时通常几十毫秒内返回。
+        /// </summary>
+        internal static bool ReadInputReport(HidDeviceInfo device, int timeoutMs, out byte[] data, out string error)
+        {
+            data = null;
+            error = null;
+            if (device == null || device.InputReportLength <= 0)
+            {
+                error = "报告长度无效";
+                return false;
+            }
+
+            IntPtr handle = CreateFile(
+                device.DevicePath, 0x80000000, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (handle == InvalidHandleValue)
+            {
+                error = "打开设备失败：" + Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            try
+            {
+                byte[] buffer = new byte[device.InputReportLength];
+                int bytesRead = 0;
+                string readError = null;
+
+                System.Threading.Tasks.Task readTask = System.Threading.Tasks.Task.Run(delegate
+                {
+                    uint count;
+                    if (ReadFile(handle, buffer, (uint)buffer.Length, out count, IntPtr.Zero))
+                    {
+                        bytesRead = (int)count;
+                    }
+                    else
+                    {
+                        readError = "ReadFile 失败：" + Marshal.GetLastWin32Error();
+                    }
+                });
+
+                if (!readTask.Wait(timeoutMs))
+                {
+                    CancelIoEx(handle, IntPtr.Zero);
+                    readTask.Wait(500);
+                    error = "读取超时";
+                    return false;
+                }
+
+                if (readError != null)
+                {
+                    error = readError;
+                    return false;
+                }
+
+                if (bytesRead <= 0)
+                {
+                    error = "未读到数据";
+                    return false;
+                }
+
+                if (bytesRead < buffer.Length)
+                {
+                    Array.Resize(ref buffer, bytesRead);
+                }
+
+                data = buffer;
+                return true;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         internal static List<HidDeviceInfo> Enumerate()
         {
             List<HidDeviceInfo> devices = new List<HidDeviceInfo>();
