@@ -95,16 +95,17 @@ namespace PeripheralBattery
         private void UpdateUi()
         {
             DeviceBattery[] all = _service.Snapshot();
-            List<DeviceBattery> visible = new List<DeviceBattery>();
+            List<DeviceBattery> online = new List<DeviceBattery>();
             foreach (DeviceBattery item in all)
             {
-                if (!_settings.HiddenIds.Contains(item.Id))
+                // 只显示当前真正读到电量的设备，避免离线的历史配对设备常驻
+                if (!_settings.HiddenIds.Contains(item.Id) && item.Online)
                 {
-                    visible.Add(item);
+                    online.Add(item);
                 }
             }
 
-            DeviceBattery[] shown = visible.ToArray();
+            DeviceBattery[] shown = online.ToArray();
             _overlay.UpdateItems(shown);
             UpdateTrayIcon(shown);
         }
@@ -171,8 +172,36 @@ namespace PeripheralBattery
             menu.Renderer = new DarkMenuRenderer();
             menu.Font = new Font("Segoe UI", 9f);
             menu.ShowImageMargin = false;
+            menu.DropShadowEnabled = false;
             menu.Opening += delegate { PopulateMenu(menu); };
+            menu.Opened += delegate { ApplyMenuRegion(menu); };
+            menu.SizeChanged += delegate
+            {
+                if (menu.Visible)
+                {
+                    ApplyMenuRegion(menu);
+                }
+            };
             return menu;
+        }
+
+        private static void ApplyMenuRegion(Forms.ContextMenuStrip menu)
+        {
+            if (menu.Width <= 0 || menu.Height <= 0)
+            {
+                return;
+            }
+
+            using (System.Drawing.Drawing2D.GraphicsPath path = UiTheme.RoundedRect(
+                new Rectangle(0, 0, menu.Width, menu.Height), 9))
+            {
+                Region previous = menu.Region;
+                menu.Region = new Region(path);
+                if (previous != null)
+                {
+                    previous.Dispose();
+                }
+            }
         }
 
         private void PopulateMenu(Forms.ContextMenuStrip menu)
@@ -181,6 +210,7 @@ namespace PeripheralBattery
             menu.BackColor = UiTheme.MenuBackground;
             menu.ForeColor = UiTheme.TextPrimary;
             menu.Font = new Font("Segoe UI", 9f);
+            menu.Padding = new Forms.Padding(4);
             menu.Items.Clear();
 
             Forms.ToolStripMenuItem title = new Forms.ToolStripMenuItem("外设电量");

@@ -42,9 +42,12 @@ namespace PeripheralBattery
 
         protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
         {
+            using (GraphicsPath path = UiTheme.RoundedRect(
+                new Rectangle(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1), 9))
             using (Pen pen = new Pen(UiTheme.MenuBorder, 1f))
             {
-                e.Graphics.DrawRectangle(pen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawPath(pen, path);
             }
         }
 
