@@ -66,6 +66,7 @@ namespace PeripheralBattery
         {
             WpfOverlay overlay = new WpfOverlay();
             overlay.RefreshRequested += delegate { StartRefresh(); };
+            overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
             return overlay;
         }
 
@@ -308,6 +309,47 @@ namespace PeripheralBattery
             };
             menu.Items.Add(taskbarItem);
 
+            Forms.ToolStripMenuItem hoverMenu = new Forms.ToolStripMenuItem("悬停背景");
+
+            Forms.ToolStripMenuItem hoverColorItem = new Forms.ToolStripMenuItem("选择颜色…");
+            hoverColorItem.Click += delegate { PickHoverColor(); };
+            hoverMenu.DropDownItems.Add(hoverColorItem);
+
+            Forms.ToolStripMenuItem alphaMenu = new Forms.ToolStripMenuItem("透明度");
+            int[] percents = new int[] { 20, 40, 60, 80, 100 };
+            foreach (int percent in percents)
+            {
+                int alpha = percent * 255 / 100;
+                int capturedAlpha = alpha;
+                int capturedPercent = percent;
+                Forms.ToolStripMenuItem alphaItem = new Forms.ToolStripMenuItem(capturedPercent + "%");
+                alphaItem.CheckState = _settings.HoverAlpha == capturedAlpha
+                    ? Forms.CheckState.Checked
+                    : Forms.CheckState.Unchecked;
+                alphaItem.Click += delegate
+                {
+                    _settings.HoverAlpha = capturedAlpha;
+                    _settings.Save();
+                    _overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
+                };
+                alphaMenu.DropDownItems.Add(alphaItem);
+            }
+
+            hoverMenu.DropDownItems.Add(alphaMenu);
+            hoverMenu.DropDownItems.Add(new Forms.ToolStripSeparator());
+
+            Forms.ToolStripMenuItem hoverResetItem = new Forms.ToolStripMenuItem("恢复默认（跟随主题）");
+            hoverResetItem.Click += delegate
+            {
+                _settings.HoverColorArgb = 0;
+                _settings.HoverAlpha = 230;
+                _settings.Save();
+                _overlay.SetHoverStyle(0, 230);
+            };
+            hoverMenu.DropDownItems.Add(hoverResetItem);
+
+            menu.Items.Add(hoverMenu);
+
             Forms.ToolStripMenuItem autoStartItem = new Forms.ToolStripMenuItem("开机自动启动");
             autoStartItem.CheckState = AutoStart.IsEnabled()
                 ? Forms.CheckState.Checked
@@ -384,6 +426,35 @@ namespace PeripheralBattery
             catch (Exception ex)
             {
                 Log.Error("枚举 HID 设备失败", ex);
+            }
+        }
+
+        private void PickHoverColor()
+        {
+            using (Forms.ColorDialog dialog = new Forms.ColorDialog())
+            {
+                dialog.FullOpen = true;
+                dialog.AnyColor = true;
+                if (_settings.HoverColorArgb != 0)
+                {
+                    dialog.Color = Color.FromArgb(
+                        (_settings.HoverColorArgb >> 16) & 0xFF,
+                        (_settings.HoverColorArgb >> 8) & 0xFF,
+                        _settings.HoverColorArgb & 0xFF);
+                }
+                else
+                {
+                    dialog.Color = UiTheme.BackgroundTop;
+                }
+
+                if (dialog.ShowDialog() == Forms.DialogResult.OK)
+                {
+                    _settings.HoverColorArgb = (dialog.Color.R << 16)
+                        | (dialog.Color.G << 8)
+                        | dialog.Color.B;
+                    _settings.Save();
+                    _overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
+                }
             }
         }
 

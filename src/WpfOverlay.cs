@@ -29,6 +29,8 @@ namespace PeripheralBattery
         private string _emptyText = "正在扫描蓝牙设备…";
         private bool _hovered;
         private bool _enabled;
+        private int _hoverColorArgb;
+        private int _hoverAlpha = 230;
         private bool _destroyed;
         private IntPtr _taskbar;
         private HwndSource _source;
@@ -196,6 +198,13 @@ namespace PeripheralBattery
             }
 
             return IntPtr.Zero;
+        }
+
+        internal void SetHoverStyle(int argb, int alpha)
+        {
+            _hoverColorArgb = argb;
+            _hoverAlpha = Math.Max(0, Math.Min(255, alpha));
+            ApplyTheme();
         }
 
         internal void SetEnabled(bool enabled)
@@ -409,10 +418,26 @@ namespace PeripheralBattery
         private void ApplyTheme()
         {
             bool light = Theme.IsLight();
-            int alpha = light ? 246 : 240;
+            int alpha;
+            Color top;
+            Color bottom;
 
-            Color top = ToMediaColor(UiTheme.BackgroundTop);
-            Color bottom = ToMediaColor(UiTheme.BackgroundBottom);
+            if (_hoverColorArgb != 0)
+            {
+                byte red = (byte)((_hoverColorArgb >> 16) & 0xFF);
+                byte green = (byte)((_hoverColorArgb >> 8) & 0xFF);
+                byte blue = (byte)(_hoverColorArgb & 0xFF);
+                top = Color.FromArgb(255, red, green, blue);
+                bottom = top;
+                alpha = _hoverAlpha;
+            }
+            else
+            {
+                top = ToMediaColor(UiTheme.BackgroundTop);
+                bottom = ToMediaColor(UiTheme.BackgroundBottom);
+                alpha = light ? 246 : 240;
+            }
+
             if (_backgroundBrush.GradientStops.Count >= 2)
             {
                 _backgroundBrush.GradientStops[0].Color = Color.FromArgb((byte)alpha, top.R, top.G, top.B);

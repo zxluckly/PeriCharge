@@ -10,6 +10,10 @@ namespace PeripheralBattery
         public int RefreshSeconds = 30;
         public readonly List<string> HiddenIds = new List<string>();
 
+        // 悬停背景自定义：HoverColorArgb 为 0 时跟随系统主题
+        public int HoverColorArgb = 0;
+        public int HoverAlpha = 230;
+
         private static string FolderPath
         {
             get
@@ -70,6 +74,22 @@ namespace PeripheralBattery
                             }
                         }
                     }
+                    else if (key == "hoverColor")
+                    {
+                        int argb;
+                        if (int.TryParse(value, out argb))
+                        {
+                            settings.HoverColorArgb = argb;
+                        }
+                    }
+                    else if (key == "hoverAlpha")
+                    {
+                        int alpha;
+                        if (int.TryParse(value, out alpha))
+                        {
+                            settings.HoverAlpha = Math.Max(0, Math.Min(255, alpha));
+                        }
+                    }
                 }
             }
             catch
@@ -89,7 +109,9 @@ namespace PeripheralBattery
                 {
                     "showTaskbar=" + (ShowTaskbar ? "1" : "0"),
                     "refreshSeconds=" + RefreshSeconds,
-                    "hiddenIds=" + string.Join("|", HiddenIds.ToArray())
+                    "hiddenIds=" + string.Join("|", HiddenIds.ToArray()),
+                    "hoverColor=" + HoverColorArgb,
+                    "hoverAlpha=" + HoverAlpha
                 };
                 File.WriteAllLines(FilePath, lines);
             }
