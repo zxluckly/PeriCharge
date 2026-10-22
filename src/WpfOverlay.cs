@@ -29,10 +29,20 @@ namespace PeripheralBattery
         private string _emptyText = "正在扫描蓝牙设备…";
         private bool _hovered;
         private bool _enabled;
+        private bool _destroyed;
         private IntPtr _taskbar;
         private HwndSource _source;
 
         internal event EventHandler RefreshRequested;
+
+        /// <summary>
+        /// 窗口被外部销毁（资源管理器重启导致父任务栏窗口级联销毁）后，
+        /// WPF Window 无法再 Show，必须由外部重建新实例。
+        /// </summary>
+        internal bool IsDestroyed
+        {
+            get { return _destroyed; }
+        }
 
         internal WpfOverlay()
         {
@@ -171,6 +181,14 @@ namespace PeripheralBattery
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
+            // 作为 Shell_TrayWnd 的子窗口，任务栏销毁时会被级联销毁；
+            // 收到销毁消息后标记不可用，避免后续 Show/定位抛异常。
+            if (msg == NativeMethods.WM_DESTROY || msg == NativeMethods.WM_NCDESTROY)
+            {
+                _destroyed = true;
+                _taskbar = IntPtr.Zero;
+            }
+
             if (msg == (int)_taskbarCreatedMessage)
             {
                 AttachToTaskbar();
@@ -182,6 +200,11 @@ namespace PeripheralBattery
 
         internal void SetEnabled(bool enabled)
         {
+            if (_destroyed)
+            {
+                return;
+            }
+
             _enabled = enabled;
             if (!enabled)
             {
@@ -201,12 +224,22 @@ namespace PeripheralBattery
         {
             _items = items;
             _emptyText = items.Length == 0 ? "未发现可读取电量的设备" : string.Empty;
+            if (_destroyed)
+            {
+                return;
+            }
+
             RebuildContent();
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
         }
 
         internal void SetScanning(bool scanning)
         {
+            if (_destroyed)
+            {
+                return;
+            }
+
             if (scanning && _items.Length == 0)
             {
                 _emptyText = "正在扫描蓝牙设备…";
@@ -217,7 +250,7 @@ namespace PeripheralBattery
 
         internal void RefreshPosition()
         {
-            if (_enabled)
+            if (_enabled && !_destroyed)
             {
                 AttachToTaskbar();
             }
@@ -225,14 +258,14 @@ namespace PeripheralBattery
 
         private void AttachToTaskbar()
         {
-            if (!_enabled)
+            if (!_enabled || _destroyed)
             {
                 return;
             }
 
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             IntPtr taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
-            if (hwnd == IntPtr.Zero || taskbar == IntPtr.Zero)
+            if (hwnd == IntPtr.Zero || taskbar == IntPtr.Zero || !NativeMethods.IsWindow(hwnd))
             {
                 return;
             }
@@ -251,13 +284,14 @@ namespace PeripheralBattery
 
         private void UpdatePosition()
         {
-            if (!_enabled)
+            if (!_enabled || _destroyed)
             {
                 return;
             }
 
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            if (hwnd == IntPtr.Zero || _taskbar == IntPtr.Zero)
+            if (hwnd == IntPtr.Zero || _taskbar == IntPtr.Zero
+                || !NativeMethods.IsWindow(hwnd) || !NativeMethods.IsWindow(_taskbar))
             {
                 return;
             }

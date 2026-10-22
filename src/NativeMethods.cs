@@ -221,6 +221,12 @@ namespace PeripheralBattery
         [DllImport("user32.dll")]
         internal static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        internal static extern bool IsWindow(IntPtr hWnd);
+
+        internal const int WM_DESTROY = 0x0002;
+        internal const int WM_NCDESTROY = 0x0082;
+
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern IntPtr SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 

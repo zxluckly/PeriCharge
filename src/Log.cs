@@ -46,5 +46,17 @@ namespace PeripheralBattery
 
             Write(text);
         }
+
+        internal static void Exception(string message, Exception exception)
+        {
+            string text = message;
+            if (exception != null)
+            {
+                // exception.ToString() 会带上完整堆栈与内部异常，便于定位
+                text += "：" + exception;
+            }
+
+            Write(text);
+        }
     }
 }

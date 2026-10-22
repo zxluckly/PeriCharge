@@ -13,10 +13,11 @@ namespace PeripheralBattery
         private readonly System.Windows.Application _app;
         private readonly Settings _settings;
         private readonly BatteryService _service;
-        private readonly WpfOverlay _overlay;
         private readonly Forms.NotifyIcon _tray;
         private readonly Forms.ContextMenuStrip _menu;
         private readonly DispatcherTimer _timer;
+        private readonly TaskbarWatcher _watcher;
+        private WpfOverlay _overlay;
 
         private DateTime _lastRefresh = DateTime.MinValue;
         private int _lastVersion = -1;
@@ -30,9 +31,13 @@ namespace PeripheralBattery
             _settings = Settings.Load();
             _service = new BatteryService();
 
-            _overlay = new WpfOverlay();
-            _overlay.RefreshRequested += delegate { StartRefresh(); };
+            _overlay = CreateOverlay();
             _menu = BuildMenu();
+
+            // 悬浮条窗口是 Shell_TrayWnd 的子窗口，资源管理器重启时会被一并销毁；
+            // 用一个独立的隐藏窗口接收 TaskbarCreated，重建悬浮条。
+            _watcher = new TaskbarWatcher();
+            _watcher.TaskbarCreated += delegate { OnTaskbarRecreated(); };
 
             _tray = new Forms.NotifyIcon();
             _tray.Text = "外设电量监控";
@@ -55,6 +60,29 @@ namespace PeripheralBattery
             {
                 _overlay.SetEnabled(_settings.ShowTaskbar);
             }));
+        }
+
+        private WpfOverlay CreateOverlay()
+        {
+            WpfOverlay overlay = new WpfOverlay();
+            overlay.RefreshRequested += delegate { StartRefresh(); };
+            return overlay;
+        }
+
+        private void OnTaskbarRecreated()
+        {
+            // explorer 重启后旧任务栏已销毁。若悬浮条窗口也被级联销毁，则重建一个新的；
+            // 若窗口仍在，只需重新挂到新任务栏上。
+            if (!_overlay.IsDestroyed)
+            {
+                _overlay.RefreshPosition();
+                return;
+            }
+
+            _overlay = CreateOverlay();
+            _overlay.SetEnabled(_settings.ShowTaskbar);
+            UpdateUi();
+            Log.Write("资源管理器重启，已重建任务栏悬浮条");
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -385,9 +413,49 @@ namespace PeripheralBattery
             _timer.Stop();
             _tray.Visible = false;
             _tray.Dispose();
-            _overlay.Close();
+            _watcher.DestroyHandle();
+            if (!_overlay.IsDestroyed)
+            {
+                _overlay.Close();
+            }
+
             Log.Write("程序退出");
             _app.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// 隐藏的顶层窗口，用于接收资源管理器广播的 TaskbarCreated 消息。
+    /// 不与任务栏建立父子关系，因此不会被级联销毁。
+    /// </summary>
+    internal sealed class TaskbarWatcher : Forms.NativeWindow
+    {
+        private readonly uint _taskbarCreatedMessage;
+
+        internal event EventHandler TaskbarCreated;
+
+        internal TaskbarWatcher()
+        {
+            _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+
+            Forms.CreateParams createParams = new Forms.CreateParams();
+            createParams.ClassName = "STATIC";
+            createParams.Style = 0;
+            CreateHandle(createParams);
+        }
+
+        protected override void WndProc(ref Forms.Message message)
+        {
+            if (message.Msg == (int)_taskbarCreatedMessage)
+            {
+                EventHandler handler = TaskbarCreated;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            }
+
+            base.WndProc(ref message);
         }
     }
 }

@@ -56,6 +56,7 @@ build.bat
 
 - 任务栏悬浮条使用 **WPF 子窗口嵌入**：`SetParent` 到 `Shell_TrayWnd`
 - WPF `AllowsTransparency` 提供逐像素透明与圆角；任务栏隐藏/显示、移动随父窗口自动同步，无需轮询
+- 资源管理器重启会连带销毁任务栏的所有子窗口（WPF `Window` 随之变为已关闭、无法再 `Show`）。程序用独立的隐藏窗口监听 `TaskbarCreated` 广播，自动重建悬浮条并重新挂载到新任务栏，不会崩溃
 - 悬停时背景加深并显示刷新按钮；背景与文字颜色跟随系统深浅色主题
 - 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值，带超时等待；**不会把系统缓存值当作实时电量**
 - DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report，按 `status & 0x0F` 解析电量档位（每档 10%）
