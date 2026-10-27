@@ -31,7 +31,7 @@ if not exist "%FAC%" (
 )
 if not exist "%OUT%" mkdir "%OUT%"
 
-"%CSC%" /nologo /codepage:65001 /target:winexe /platform:anycpu /optimize+ /out:"%OUT%\PeripheralBattery.exe" /win32manifest:"%SRC%\app.manifest" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:"%NET48%\WindowsBase.dll" /r:"%NET48%\PresentationCore.dll" /r:"%NET48%\PresentationFramework.dll" /r:"%NET48%\System.Xaml.dll" /r:"%WRT%" /r:"%FAC%" /r:"%WINMD%" "%SRC%\*.cs"
+"%CSC%" /nologo /codepage:65001 /target:winexe /platform:anycpu /optimize+ /out:"%OUT%\PeripheralBattery.exe" /win32manifest:"%SRC%\app.manifest" /win32icon:"%SRC%\app.ico" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:"%NET48%\WindowsBase.dll" /r:"%NET48%\PresentationCore.dll" /r:"%NET48%\PresentationFramework.dll" /r:"%NET48%\System.Xaml.dll" /r:"%WRT%" /r:"%FAC%" /r:"%WINMD%" "%SRC%\*.cs"
 
 if errorlevel 1 (
     echo [ERROR] Build failed.

@@ -41,7 +41,8 @@ Windows 托盘 + 任务栏悬浮条，实时显示蓝牙外设电量。
 build.bat
 ```
 
-产物：`bin\PeripheralBattery.exe`
+产物：`bin\PeripheralBattery.exe`，程序图标取自 `src\app.ico`（由 `/win32icon` 内嵌，
+含 16/20/24/32/40/48/64/128/256 九种尺寸）。
 
 ## 运行
 
