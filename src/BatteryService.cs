@@ -24,10 +24,17 @@ namespace PeripheralBattery
         private readonly object _lock = new object();
         private readonly Dictionary<string, DeviceBattery> _devices = new Dictionary<string, DeviceBattery>();
         private readonly HashSet<string> _supported = new HashSet<string>();
-        private readonly Dictionary<string, DateTime> _retryAfter = new Dictionary<string, DateTime>();
 
-        /// <summary>读不到的设备退避多久再试（秒）。</summary>
-        private const int RetryBackoffSeconds = 60;
+        /// <summary>已经记过「读不到」的设备，避免定时全量扫描每分钟重复刷日志。</summary>
+        private readonly HashSet<string> _reportedFailure = new HashSet<string>();
+
+        /// <summary>
+        /// 多久做一次全量扫描（秒）。
+        /// 平时只刷新「当前能读到电量」的设备；关机设备不进列表也不刷新。
+        /// 但要在设备重新上线时发现它，就必须偶尔把所有已配对设备探一遍——
+        /// 这是唯一的发现手段，所以留一个低频兜底，靠后台派发完成，不阻塞界面。
+        /// </summary>
+        private const int FullScanIntervalSeconds = 60;
 
         /// <summary>
         /// 单个 BLE 设备一次读取的总预算（毫秒）。
@@ -49,6 +56,7 @@ namespace PeripheralBattery
         private volatile int _version;
         private int _busy;
         private bool _loggedFirstRefresh;
+        private DateTime _lastFullScanAt = DateTime.MinValue;
 
         /// <summary>上次记录的已配对 BLE 设备数量，用于抑制重复日志（-1 表示还没记过）。</summary>
         private int _lastBleCount = -1;
@@ -107,6 +115,12 @@ namespace PeripheralBattery
                 // 这里只做「枚举 + 派发」，不等待各设备读回来：
                 // 关机设备单次要等十几秒，等它就是把整轮刷新一起拖住。
                 // 每台设备读到结果后自己 ApplyResult 并递增 _version，UI 一秒内自然刷新。
+                // 定时全量扫描是发现「刚上线设备」的唯一手段，低频兜底一次
+                if (!_scanAll && (DateTime.Now - _lastFullScanAt).TotalSeconds >= FullScanIntervalSeconds)
+                {
+                    _scanAll = true;
+                }
+
                 await UpdateBleDevicesAsync().ConfigureAwait(false);
 
                 if (_scanAll)
@@ -133,6 +147,11 @@ namespace PeripheralBattery
         private async Task UpdateBleDevicesAsync()
         {
             bool fullScan = _scanAll;
+            if (fullScan)
+            {
+                _lastFullScanAt = DateTime.Now;
+            }
+
             List<DeviceInformation> targets = new List<DeviceInformation>();
 
             try
@@ -142,30 +161,22 @@ namespace PeripheralBattery
                     DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
                     DateTime.Now.AddMilliseconds(EnumerationBudgetMs)).ConfigureAwait(false);
 
-                DateTime now = DateTime.Now;
                 foreach (DeviceInformation info in all)
                 {
-                    bool known;
-                    DateTime retryAt = DateTime.MinValue;
-                    lock (_lock)
+                    if (!fullScan)
                     {
-                        known = _supported.Contains(info.Id);
-                        if (!fullScan)
+                        // 只刷新列表里已经能读到电量的设备。
+                        // 关机设备读不到时就已经被移出列表，这里自然不会再碰它。
+                        bool known;
+                        lock (_lock)
                         {
-                            _retryAfter.TryGetValue(info.Id, out retryAt);
+                            known = _supported.Contains(info.Id);
                         }
-                    }
 
-                    if (!fullScan && !known)
-                    {
-                        continue;
-                    }
-
-                    // 关机或休眠的设备每次刷新都要等满超时（实测 8 秒），
-                    // 失败后退避一段时间再试，避免每一轮都被它拖慢
-                    if (!fullScan && retryAt > now)
-                    {
-                        continue;
+                        if (!known)
+                        {
+                            continue;
+                        }
                     }
 
                     targets.Add(info);
@@ -283,19 +294,26 @@ namespace PeripheralBattery
         {
             lock (_lock)
             {
-                bool known = _supported.Contains(info.Id);
-                if (result.Percent < 0 && !known && !result.HasBatteryService)
+                if (result.Percent < 0)
                 {
-                    // 没有电池服务的设备（手机、平板等）不进入列表
-                    Log.Write("跳过设备 " + info.Name + "：" + result.Error);
+                    // 读不到就不进列表，已经在列表里的也移出去：
+                    // 关机/休眠设备不该占一个「未连接」条目，也不该每轮都去碰它。
+                    // 等下一次全量扫描（定时兜底、插拔通知、菜单重扫）再发现它。
+                    bool wasShown = _devices.Remove(info.Id);
+                    _supported.Remove(info.Id);
+
+                    // 定时全量扫描每分钟都会走到这里，同一台设备只记一次，
+                    // 否则一天下来光这一行就是几千条
+                    if (wasShown || _reportedFailure.Add(info.Id))
+                    {
+                        Log.Write("未读到电量，" + (wasShown ? "移出列表：" : "不显示：")
+                            + info.Name + "（" + result.Error + "）");
+                    }
+
                     return;
                 }
 
-                // 有电池服务的设备即使当前未连接也保留在列表中，后续刷新继续尝试
-                if (result.HasBatteryService)
-                {
-                    _supported.Add(info.Id);
-                }
+                _reportedFailure.Remove(info.Id);
 
                 DeviceBattery item;
                 if (!_devices.TryGetValue(info.Id, out item))
@@ -307,31 +325,14 @@ namespace PeripheralBattery
                 }
 
                 item.Name = string.IsNullOrEmpty(info.Name) ? "未知设备" : info.Name;
-                if (result.Percent >= 0)
-                {
-                    item.Percent = result.Percent;
-                    item.Online = true;
-                    item.Supported = true;
-                    item.Charging = result.Charging;
-                    item.Full = result.Full;
-                    item.UpdatedAt = DateTime.Now;
-                    item.Error = null;
-                    _supported.Add(info.Id);
-                    _retryAfter.Remove(info.Id);
-                }
-                else
-                {
-                    item.Online = false;
-                    item.Error = result.Error;
-                    // 有电池服务但这次读不到（关机/休眠/不可达）：退避后再试，
-                    // 免得每轮刷新都为它等一次超时；没有电池服务的设备不用退避
-                    if (result.HasBatteryService)
-                    {
-                        _retryAfter[info.Id] = DateTime.Now.AddSeconds(RetryBackoffSeconds);
-                    }
-
-                    Log.Write("设备读取失败：" + item.Name + "（" + result.Error + "）");
-                }
+                item.Percent = result.Percent;
+                item.Online = true;
+                item.Supported = true;
+                item.Charging = result.Charging;
+                item.Full = result.Full;
+                item.UpdatedAt = DateTime.Now;
+                item.Error = null;
+                _supported.Add(info.Id);
             }
         }
 
@@ -339,7 +340,6 @@ namespace PeripheralBattery
         {
             public int Percent;
             public string Error;
-            public bool HasBatteryService;
             public bool Charging;
             public bool Full;
         }
@@ -480,8 +480,6 @@ namespace PeripheralBattery
                     result.Error = "设备没有标准电池服务";
                     return result;
                 }
-
-                result.HasBatteryService = true;
 
                 GattCharacteristicsResult characteristics = await AwaitAsync(
                     batteryService.GetCharacteristicsAsync(), deadline).ConfigureAwait(false);
