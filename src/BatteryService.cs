@@ -32,6 +32,9 @@ namespace PeripheralBattery
         private volatile int _version;
         private int _busy;
 
+        /// <summary>上次记录的已配对 BLE 设备数量，用于抑制重复日志（-1 表示还没记过）。</summary>
+        private int _lastBleCount = -1;
+
         internal BatteryService()
         {
             _scanAll = true;
@@ -45,6 +48,8 @@ namespace PeripheralBattery
         internal void RequestFullScan()
         {
             _scanAll = true;
+            // 全量扫描意味着设备可能已经变了，HID 的枚举缓存一起作废
+            HidBatteryService.Invalidate();
         }
 
         internal DeviceBattery[] Snapshot()
@@ -134,7 +139,13 @@ namespace PeripheralBattery
                     targets.Add(info);
                 }
 
-                Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，本次刷新 " + targets.Count + " 个");
+                // 这条每轮都会命中，只在数量变化时记一次，
+                // 否则一天下来光这一行就能刷掉上百 KB 日志
+                if (all.Count != _lastBleCount)
+                {
+                    _lastBleCount = all.Count;
+                    Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，本次刷新 " + targets.Count + " 个");
+                }
             }
             catch (Exception ex)
             {
@@ -325,9 +336,11 @@ namespace PeripheralBattery
 
                         if ((flags & 0x02) != 0 && index < data.Length)
                         {
-                            // Additional Battery Status bits 0-1: 1=Charging
-                            int chargeState = data[index] & 0x03;
+                            // Additional Battery Status 低 3 位：
+                            // 0 未知 / 1 充电中 / 2 放电中 / 3 已充满 / 4 未充电
+                            int chargeState = data[index] & 0x07;
                             result.Charging = chargeState == 1;
+                            result.Full = chargeState == 3;
                         }
                     }
                 }
@@ -343,6 +356,11 @@ namespace PeripheralBattery
             ReadResult result = new ReadResult();
             result.Percent = -1;
             BluetoothLEDevice device = null;
+
+            // GattDeviceService 各自持有一个设备句柄，必须逐个 Dispose。
+            // 之前只 Dispose 了 BluetoothLEDevice，这些服务对象一直挂到 GC 才释放，
+            // 每轮刷新就漏掉一批句柄（Xbox 这类设备一次能开出十来个 GATT 服务）。
+            List<GattDeviceService> openedServices = new List<GattDeviceService>();
 
             try
             {
@@ -378,10 +396,10 @@ namespace PeripheralBattery
                 GattDeviceService batteryService = null;
                 foreach (GattDeviceService service in services.Services)
                 {
+                    openedServices.Add(service);
                     if (service.Uuid == BatteryServiceUuid)
                     {
                         batteryService = service;
-                        break;
                     }
                 }
 
@@ -451,6 +469,18 @@ namespace PeripheralBattery
             }
             finally
             {
+                foreach (GattDeviceService service in openedServices)
+                {
+                    try
+                    {
+                        service.Dispose();
+                    }
+                    catch
+                    {
+                        // 设备已经掉线时 Dispose 也可能抛，忽略即可
+                    }
+                }
+
                 if (device != null)
                 {
                     device.Dispose();
@@ -460,6 +490,9 @@ namespace PeripheralBattery
 
         private static async Task<T> AwaitAsync<T>(Windows.Foundation.IAsyncOperation<T> operation, int timeoutMs)
         {
+            // 超时后这里只是「不再等」，底层操作仍会自己跑完（最终返回 Unreachable 之类）。
+            // 试过给它挂 CancellationToken 主动取消，实测句柄增长反而更快，
+            // 所以维持放弃等待的写法，不主动取消。
             Task<T> task = System.WindowsRuntimeSystemExtensions.AsTask(operation);
             Task completed = await Task.WhenAny(task, Task.Delay(timeoutMs)).ConfigureAwait(false);
             if (completed != task)

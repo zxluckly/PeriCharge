@@ -9,96 +9,142 @@ namespace PeripheralBattery
     /// </summary>
     internal static class HidBatteryService
     {
-        internal static List<DeviceBattery> ReadAll()
+        /// <summary>
+        /// 枚举结果的缓存。SetupAPI 枚举一次要把系统里每个 HID 接口都 CreateFile 打开再关闭
+        /// （鼠标、键盘、各种接收器都算），一轮就是十几个句柄开合，纯属浪费。
+        /// 设备增删由 WM_DEVICECHANGE 通知失效；万一某次广播没收到，超过
+        /// <see cref="CacheMaxAgeSeconds"/> 秒也会强制重新枚举一次，不会一直用旧列表。
+        /// </summary>
+        private static List<HidDeviceInfo> s_devices;
+        private static DateTime s_cachedAt = DateTime.MinValue;
+        private static volatile bool s_dirty = true;
+
+        private const int CacheMaxAgeSeconds = 180;
+
+        /// <summary>设备列表可能已变化（插拔、休眠唤醒），下一轮重新枚举。</summary>
+        internal static void Invalidate()
         {
-            List<DeviceBattery> result = new List<DeviceBattery>();
-            List<HidDeviceInfo> devices;
+            s_dirty = true;
+        }
+
+        private static List<HidDeviceInfo> GetDevices()
+        {
+            bool expired = (DateTime.Now - s_cachedAt).TotalSeconds >= CacheMaxAgeSeconds;
+            if (s_devices != null && !s_dirty && !expired)
+            {
+                return s_devices;
+            }
 
             try
             {
-                devices = HidEnumerator.Enumerate();
+                s_devices = HidEnumerator.Enumerate();
+                s_cachedAt = DateTime.Now;
+                s_dirty = false;
             }
             catch (Exception ex)
             {
                 Log.Error("HID 枚举失败", ex);
-                return result;
+                if (s_devices == null)
+                {
+                    s_devices = new List<HidDeviceInfo>();
+                }
             }
 
-            List<DeviceBattery> items = new List<DeviceBattery>();
-            List<bool> usbFlags = new List<bool>();
+            return s_devices;
+        }
+
+        internal static List<DeviceBattery> ReadAll()
+        {
+            List<DeviceBattery> result = new List<DeviceBattery>();
+            List<HidDeviceInfo> devices = GetDevices();
+
+            int attempts = 0;
+            int succeeded = 0;
+
+            // 同一个手柄同时插着 USB 又连着蓝牙时，Windows 会为它暴露两个 HID 节点
+            // （USB 的 VID_054C&PID_0CE6 和蓝牙的 {00001124-...}_VID&0002054C_PID&0CE6），
+            // 两个都能读到电量，都读就会重复显示两个同名设备。
+            // 这里先按产品名分组，遇到「恰好一个 USB 一个蓝牙」就只读 USB（插线时 USB 报告
+            // 才是权威值），USB 读不到才退到蓝牙——每轮只读一遍，不用读完再合并。
+            Dictionary<string, List<HidDeviceInfo>> groups = new Dictionary<string, List<HidDeviceInfo>>();
+            List<string> order = new List<string>();
 
             foreach (HidDeviceInfo device in devices)
             {
-                if (device.VendorId == 0x054C && device.ProductId == 0x0CE6
-                    && device.UsagePage == 0x01 && device.Usage == 0x05)
-                {
-                    DeviceBattery item = ReadDualSense(device);
-                    if (item != null)
-                    {
-                        items.Add(item);
-                        usbFlags.Add(IsUsbTransport(device.DevicePath));
-                    }
-                }
-            }
-
-            // 同一个手柄同时插着 USB 又连着蓝牙时，Windows 会为它暴露两个 HID 节点
-            // （一个 USB 的 VID_054C&PID_0CE6，一个蓝牙的 {00001124-...}_VID&0002054C_PID&0CE6），
-            // 两个都能读到电量，界面就会重复显示两个同名设备。
-            // 这里把「同型号、恰好一个 USB 一个蓝牙」的组合并成一个，保留 USB 读数
-            // （插线时 USB 报告才是权威值）。蓝牙同时连两个手柄的情况仍按两个显示。
-            Dictionary<string, List<int>> groups = new Dictionary<string, List<int>>();
-            for (int i = 0; i < items.Count; i++)
-            {
-                string key = items[i].Name;
-                List<int> group;
-                if (!groups.TryGetValue(key, out group))
-                {
-                    group = new List<int>();
-                    groups[key] = group;
-                }
-                group.Add(i);
-            }
-
-            bool[] keep = new bool[items.Count];
-            for (int i = 0; i < keep.Length; i++)
-            {
-                keep[i] = true;
-            }
-
-            foreach (List<int> group in groups.Values)
-            {
-                if (group.Count != 2)
+                if (device.VendorId != 0x054C || device.ProductId != 0x0CE6
+                    || device.UsagePage != 0x01 || device.Usage != 0x05)
                 {
                     continue;
                 }
 
-                int usbAt = -1;
-                int btAt = -1;
-                foreach (int i in group)
+                string key = device.ProductName ?? string.Empty;
+                List<HidDeviceInfo> group;
+                if (!groups.TryGetValue(key, out group))
                 {
-                    if (usbFlags[i])
+                    group = new List<HidDeviceInfo>();
+                    groups[key] = group;
+                    order.Add(key);
+                }
+
+                group.Add(device);
+            }
+
+            foreach (string key in order)
+            {
+                List<HidDeviceInfo> group = groups[key];
+
+                HidDeviceInfo usb = null;
+                HidDeviceInfo bluetooth = null;
+                foreach (HidDeviceInfo device in group)
+                {
+                    if (IsUsbTransport(device.DevicePath))
                     {
-                        usbAt = i;
+                        usb = device;
                     }
                     else
                     {
-                        btAt = i;
+                        bluetooth = device;
                     }
                 }
 
-                if (usbAt >= 0 && btAt >= 0)
+                if (usb != null && bluetooth != null && group.Count == 2)
                 {
-                    keep[btAt] = false;
-                    Log.Write("同一手柄的 USB 与蓝牙节点已合并，保留 USB 读数：" + items[usbAt].Name);
+                    attempts++;
+                    DeviceBattery fromUsb = ReadDualSense(usb);
+                    if (fromUsb != null)
+                    {
+                        succeeded++;
+                        result.Add(fromUsb);
+                        continue;
+                    }
+
+                    attempts++;
+                    DeviceBattery fromBluetooth = ReadDualSense(bluetooth);
+                    if (fromBluetooth != null)
+                    {
+                        succeeded++;
+                        result.Add(fromBluetooth);
+                    }
+                    continue;
+                }
+
+                foreach (HidDeviceInfo device in group)
+                {
+                    attempts++;
+                    DeviceBattery item = ReadDualSense(device);
+                    if (item != null)
+                    {
+                        succeeded++;
+                        result.Add(item);
+                    }
                 }
             }
 
-            for (int i = 0; i < items.Count; i++)
+            // 缓存里有设备却一个都读不到，多半是插拔后节点变了而通知没收到，
+            // 下次重新枚举一次；能读到就不动，避免每轮都白枚举一遍
+            if (attempts > 0 && succeeded == 0)
             {
-                if (keep[i])
-                {
-                    result.Add(items[i]);
-                }
+                s_dirty = true;
             }
 
             return result;

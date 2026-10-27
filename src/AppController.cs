@@ -16,10 +16,11 @@ namespace PeripheralBattery
         private readonly Forms.NotifyIcon _tray;
         private readonly Forms.ContextMenuStrip _menu;
         private readonly DispatcherTimer _timer;
-        private readonly TaskbarWatcher _watcher;
+        private readonly BroadcastWatcher _watcher;
         private WpfOverlay _overlay;
 
         private DateTime _lastRefresh = DateTime.MinValue;
+        private DateTime _lastDeviceChange = DateTime.MinValue;
         private int _lastVersion = -1;
         private volatile bool _refreshing;
         private bool _exiting;
@@ -36,8 +37,10 @@ namespace PeripheralBattery
 
             // 悬浮条窗口是 Shell_TrayWnd 的子窗口，资源管理器重启时会被一并销毁；
             // 用一个独立的隐藏窗口接收 TaskbarCreated，重建悬浮条。
-            _watcher = new TaskbarWatcher();
+            // 顺带接 WM_DEVICECHANGE：插拔外设时立刻重新枚举，而不是等下一轮全量扫描。
+            _watcher = new BroadcastWatcher();
             _watcher.TaskbarCreated += delegate { OnTaskbarRecreated(); };
+            _watcher.DevicesChanged += delegate { OnDevicesChanged(); };
 
             _tray = new Forms.NotifyIcon();
             _tray.Text = "外设电量监控";
@@ -84,6 +87,21 @@ namespace PeripheralBattery
             _overlay.SetEnabled(_settings.ShowTaskbar);
             UpdateUi();
             Log.Write("资源管理器重启，已重建任务栏悬浮条");
+        }
+
+        /// <summary>设备树变化（插拔、休眠唤醒）时重新枚举并刷新一次。</summary>
+        private void OnDevicesChanged()
+        {
+            // 一个 USB 复合设备插入会连着发好几条 DBT_DEVNODES_CHANGED，
+            // 简单去抖，免得一口气触发多次扫描
+            if ((DateTime.Now - _lastDeviceChange).TotalSeconds < 3)
+            {
+                return;
+            }
+
+            _lastDeviceChange = DateTime.Now;
+            _service.RequestFullScan();
+            StartRefresh();
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -505,16 +523,22 @@ namespace PeripheralBattery
     }
 
     /// <summary>
-    /// 隐藏的顶层窗口，用于接收资源管理器广播的 TaskbarCreated 消息。
-    /// 不与任务栏建立父子关系，因此不会被级联销毁。
+    /// 隐藏的顶层窗口，用来接收系统广播消息：资源管理器的 TaskbarCreated，
+    /// 以及设备增删的 WM_DEVICECHANGE。不与任务栏建立父子关系，因此不会被级联销毁。
     /// </summary>
-    internal sealed class TaskbarWatcher : Forms.NativeWindow
+    internal sealed class BroadcastWatcher : Forms.NativeWindow
     {
+        private const int WM_DEVICECHANGE = 0x0219;
+        private const int DBT_DEVNODES_CHANGED = 0x0007;
+
         private readonly uint _taskbarCreatedMessage;
 
         internal event EventHandler TaskbarCreated;
 
-        internal TaskbarWatcher()
+        /// <summary>设备树发生变化（插拔、休眠唤醒），已配对设备列表需要重新枚举。</summary>
+        internal event EventHandler DevicesChanged;
+
+        internal BroadcastWatcher()
         {
             _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
 
@@ -529,6 +553,14 @@ namespace PeripheralBattery
             if (message.Msg == (int)_taskbarCreatedMessage)
             {
                 EventHandler handler = TaskbarCreated;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            }
+            else if (message.Msg == WM_DEVICECHANGE && message.WParam.ToInt32() == DBT_DEVNODES_CHANGED)
+            {
+                EventHandler handler = DevicesChanged;
                 if (handler != null)
                 {
                     handler(this, EventArgs.Empty);
