@@ -23,6 +23,10 @@ namespace PeripheralBattery
         private readonly object _lock = new object();
         private readonly Dictionary<string, DeviceBattery> _devices = new Dictionary<string, DeviceBattery>();
         private readonly HashSet<string> _supported = new HashSet<string>();
+        private readonly Dictionary<string, DateTime> _retryAfter = new Dictionary<string, DateTime>();
+
+        /// <summary>读不到的设备退避多久再试（秒）。</summary>
+        private const int RetryBackoffSeconds = 60;
 
         private volatile bool _scanAll;
         private volatile int _version;
@@ -70,46 +74,14 @@ namespace PeripheralBattery
 
             try
             {
-                bool fullScan = _scanAll;
-                List<DeviceInformation> targets = new List<DeviceInformation>();
-
-                try
-                {
-                    string selector = BluetoothLEDevice.GetDeviceSelectorFromPairingState(true);
-                    DeviceInformationCollection all = await AwaitAsync(
-                        DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
-                        15000).ConfigureAwait(false);
-
-                    foreach (DeviceInformation info in all)
-                    {
-                        bool known;
-                        lock (_lock)
-                        {
-                            known = _supported.Contains(info.Id);
-                        }
-
-                        if (fullScan || known)
-                        {
-                            targets.Add(info);
-                        }
-                    }
-
-                    Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，本次刷新 " + targets.Count + " 个");
-                }
-                catch (Exception ex)
-                {
-                    // 蓝牙关闭或适配器不可用时保持旧数据
-                    Log.Error("枚举蓝牙设备失败", ex);
-                }
-
-                foreach (DeviceInformation info in targets)
-                {
-                    await UpdateDeviceAsync(info).ConfigureAwait(false);
-                }
-
+                // HID（DualSense 这类经典蓝牙手柄）是毫秒级返回的，先读并立刻发布一次，
+                // 否则首屏要等后面 BLE 的枚举和各设备超时，看起来像启动卡了十几秒。
                 await UpdateHidDevicesAsync().ConfigureAwait(false);
+                _version++;
 
-                if (fullScan)
+                await UpdateBleDevicesAsync().ConfigureAwait(false);
+
+                if (_scanAll)
                 {
                     _scanAll = false;
                 }
@@ -119,6 +91,65 @@ namespace PeripheralBattery
                 Interlocked.Exchange(ref _busy, 0);
                 _version++;
             }
+        }
+
+        private async Task UpdateBleDevicesAsync()
+        {
+            bool fullScan = _scanAll;
+            List<DeviceInformation> targets = new List<DeviceInformation>();
+
+            try
+            {
+                string selector = BluetoothLEDevice.GetDeviceSelectorFromPairingState(true);
+                DeviceInformationCollection all = await AwaitAsync(
+                    DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
+                    15000).ConfigureAwait(false);
+
+                DateTime now = DateTime.Now;
+                foreach (DeviceInformation info in all)
+                {
+                    bool known;
+                    DateTime retryAt = DateTime.MinValue;
+                    lock (_lock)
+                    {
+                        known = _supported.Contains(info.Id);
+                        if (!fullScan)
+                        {
+                            _retryAfter.TryGetValue(info.Id, out retryAt);
+                        }
+                    }
+
+                    if (!fullScan && !known)
+                    {
+                        continue;
+                    }
+
+                    // 关机或休眠的设备每次刷新都要等满超时（实测 8 秒），
+                    // 失败后退避一段时间再试，避免每一轮都被它拖慢
+                    if (!fullScan && retryAt > now)
+                    {
+                        continue;
+                    }
+
+                    targets.Add(info);
+                }
+
+                Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，本次刷新 " + targets.Count + " 个");
+            }
+            catch (Exception ex)
+            {
+                // 蓝牙关闭或适配器不可用时保持旧数据
+                Log.Error("枚举蓝牙设备失败", ex);
+            }
+
+            // 设备之间互不依赖，并行读，避免串行累加各自的超时
+            Task[] tasks = new Task[targets.Count];
+            for (int i = 0; i < targets.Count; i++)
+            {
+                tasks[i] = UpdateDeviceAsync(targets[i]);
+            }
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
 
         private async Task UpdateHidDevicesAsync()
@@ -207,11 +238,19 @@ namespace PeripheralBattery
                     item.UpdatedAt = DateTime.Now;
                     item.Error = null;
                     _supported.Add(info.Id);
+                    _retryAfter.Remove(info.Id);
                 }
                 else
                 {
                     item.Online = false;
                     item.Error = result.Error;
+                    // 有电池服务但这次读不到（关机/休眠/不可达）：退避后再试，
+                    // 免得每轮刷新都为它等一次超时；没有电池服务的设备不用退避
+                    if (result.HasBatteryService)
+                    {
+                        _retryAfter[info.Id] = DateTime.Now.AddSeconds(RetryBackoffSeconds);
+                    }
+
                     Log.Write("设备读取失败：" + item.Name + "（" + result.Error + "）");
                 }
             }
