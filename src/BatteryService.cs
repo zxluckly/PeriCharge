@@ -17,8 +17,6 @@ namespace PeripheralBattery
     {
         private static readonly Guid BatteryServiceUuid = new Guid("0000180f-0000-1000-8000-00805f9b34fb");
         private static readonly Guid BatteryLevelUuid = new Guid("00002a19-0000-1000-8000-00805f9b34fb");
-        private static readonly Guid BatteryPowerStateUuid = new Guid("00002a1a-0000-1000-8000-00805f9b34fb");
-        private static readonly Guid BatteryLevelStatusUuid = new Guid("00002bed-0000-1000-8000-00805f9b34fb");
 
         private readonly object _lock = new object();
         private readonly Dictionary<string, DeviceBattery> _devices = new Dictionary<string, DeviceBattery>();
@@ -202,8 +200,6 @@ namespace PeripheralBattery
                     item.Percent = result.Percent;
                     item.Online = true;
                     item.Supported = true;
-                    item.Charging = result.Charging;
-                    item.Full = result.Full;
                     item.UpdatedAt = DateTime.Now;
                     item.Error = null;
                     _supported.Add(info.Id);
@@ -222,81 +218,6 @@ namespace PeripheralBattery
             public int Percent;
             public string Error;
             public bool HasBatteryService;
-            public bool Charging;
-            public bool Full;
-        }
-
-        /// <summary>
-        /// 读取标准 BLE 充电状态：0x2A1A Battery Power State（优先）
-        /// 或 0x2BED Battery Level Status。两者都是可选特征，失败不影响电量。
-        /// </summary>
-        private static async Task ReadChargeStateAsync(
-            IReadOnlyList<GattCharacteristic> characteristics, ReadResult result)
-        {
-            try
-            {
-                GattCharacteristic powerState = null;
-                GattCharacteristic levelStatus = null;
-                foreach (GattCharacteristic characteristic in characteristics)
-                {
-                    if (characteristic.Uuid == BatteryPowerStateUuid)
-                    {
-                        powerState = characteristic;
-                    }
-                    else if (characteristic.Uuid == BatteryLevelStatusUuid)
-                    {
-                        levelStatus = characteristic;
-                    }
-                }
-
-                if (powerState != null)
-                {
-                    GattReadResult read = await AwaitAsync(
-                        powerState.ReadValueAsync(BluetoothCacheMode.Uncached), 5000).ConfigureAwait(false);
-
-                    if (read != null && read.Status == GattCommunicationStatus.Success
-                        && read.Value.Length >= 1)
-                    {
-                        DataReader reader = DataReader.FromBuffer(read.Value);
-                        byte value = reader.ReadByte();
-                        // bits 6-7: 0=Unknown, 1=Charging, 2=Discharging, 3=Not charging
-                        int chargeState = (value >> 6) & 0x03;
-                        result.Charging = chargeState == 1;
-                        return;
-                    }
-                }
-
-                if (levelStatus != null)
-                {
-                    GattReadResult read = await AwaitAsync(
-                        levelStatus.ReadValueAsync(BluetoothCacheMode.Uncached), 5000).ConfigureAwait(false);
-
-                    if (read != null && read.Status == GattCommunicationStatus.Success
-                        && read.Value.Length >= 2)
-                    {
-                        byte[] data = new byte[read.Value.Length];
-                        DataReader.FromBuffer(read.Value).ReadBytes(data);
-
-                        int flags = data[0];
-                        int index = 1;
-                        if ((flags & 0x01) != 0)
-                        {
-                            index++; // Battery Level Present
-                        }
-
-                        if ((flags & 0x02) != 0 && index < data.Length)
-                        {
-                            // Additional Battery Status bits 0-1: 1=Charging
-                            int chargeState = data[index] & 0x03;
-                            result.Charging = chargeState == 1;
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // 充电状态是可选信息，读取失败忽略
-            }
         }
 
         private static async Task<ReadResult> ReadBatteryPercentAsync(string deviceId)
@@ -395,9 +316,6 @@ namespace PeripheralBattery
                 DataReader reader = DataReader.FromBuffer(read.Value);
                 byte value = reader.ReadByte();
                 result.Percent = value > 100 ? 100 : value;
-
-                // 可选：读取标准充电状态特征
-                await ReadChargeStateAsync(characteristics.Characteristics, result).ConfigureAwait(false);
                 return result;
             }
             catch (TimeoutException)
