@@ -50,7 +50,7 @@ build.bat
 %APPDATA%\PeripheralBattery\log.txt
 ```
 
-首次启动会串行扫描全部已配对 BLE 设备（约 30–50 秒），之后只刷新成功读到电量的设备。
+首次启动先读 HID 手柄并立即显示，再并行扫描已配对的 BLE 设备；读不到的设备会退避 60 秒再试，不会每轮都等满超时。
 
 ## 实现说明
 
@@ -59,7 +59,8 @@ build.bat
 - 资源管理器重启会连带销毁任务栏的所有子窗口（WPF `Window` 随之变为已关闭、无法再 `Show`）。程序用独立的隐藏窗口监听 `TaskbarCreated` 广播，自动重建悬浮条并重新挂载到新任务栏，不会崩溃
 - 悬停时背景加深并显示刷新按钮；背景与文字颜色跟随系统深浅色主题
 - 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值，带超时等待；**不会把系统缓存值当作实时电量**
-- DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report，按 `status & 0x0F` 解析电量档位（每档 10%）
+- DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report：低 4 位是电量档位（每档约 10%），高 4 位是充电状态（0 放电 / 1 充电 / 2 充满 / A、B 异常 / F 错误）
+- 同一手柄同时插 USB 又连着蓝牙时，Windows 会暴露两个 HID 节点，程序会把它们合并成一个，保留 USB 读数
 - 设备仅在成功读到实时电量后才显示数字；未连接设备显示「未连接」
 - HID 识别使用 SetupAPI / hid.dll（`HidD_GetAttributes`、`HidP_GetCaps`），对应 WebHID 的 `getDevices()` + `collections`
 
