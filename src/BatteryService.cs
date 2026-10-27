@@ -23,7 +23,6 @@ namespace PeripheralBattery
 
         private readonly object _lock = new object();
         private readonly Dictionary<string, DeviceBattery> _devices = new Dictionary<string, DeviceBattery>();
-        private readonly HashSet<string> _supported = new HashSet<string>();
 
         /// <summary>已经记过「读不到」的设备，避免定时全量扫描每分钟重复刷日志。</summary>
         private readonly HashSet<string> _reportedFailure = new HashSet<string>();
@@ -51,6 +50,9 @@ namespace PeripheralBattery
 
         /// <summary>正在读取的设备，防止上一轮还没回来又发起一次。</summary>
         private readonly HashSet<string> _inflight = new HashSet<string>();
+
+        /// <summary>每台已配对设备的会话：连接对象、缓存的 GATT 服务/特征、连接状态订阅。</summary>
+        private readonly Dictionary<string, BleSession> _sessions = new Dictionary<string, BleSession>();
 
         private volatile bool _scanAll;
         private volatile int _version;
@@ -152,51 +154,26 @@ namespace PeripheralBattery
                 _lastFullScanAt = DateTime.Now;
             }
 
-            List<DeviceInformation> targets = new List<DeviceInformation>();
-
-            try
+            if (fullScan)
             {
-                string selector = BluetoothLEDevice.GetDeviceSelectorFromPairingState(true);
-                DeviceInformationCollection all = await AwaitAsync(
-                    DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
-                    DateTime.Now.AddMilliseconds(EnumerationBudgetMs)).ConfigureAwait(false);
+                await DiscoverBleSessionsAsync().ConfigureAwait(false);
+            }
 
-                foreach (DeviceInformation info in all)
+            // 只对「当前已连接」的设备发读请求。
+            // 未连接的设备一个字节都不发，也就不存在等超时的问题——
+            // 它们靠 ConnectionStatusChanged 事件通知我们什么时候连上了。
+            List<BleSession> targets = new List<BleSession>();
+            lock (_lock)
+            {
+                foreach (BleSession session in _sessions.Values)
                 {
-                    if (!fullScan)
+                    if (IsConnected(session))
                     {
-                        // 只刷新列表里已经能读到电量的设备。
-                        // 关机设备读不到时就已经被移出列表，这里自然不会再碰它。
-                        bool known;
-                        lock (_lock)
-                        {
-                            known = _supported.Contains(info.Id);
-                        }
-
-                        if (!known)
-                        {
-                            continue;
-                        }
+                        targets.Add(session);
                     }
-
-                    targets.Add(info);
-                }
-
-                // 这条每轮都会命中，只在数量变化时记一次，
-                // 否则一天下来光这一行就能刷掉上百 KB 日志
-                if (all.Count != _lastBleCount)
-                {
-                    _lastBleCount = all.Count;
-                    Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，本次刷新 " + targets.Count + " 个");
                 }
             }
-            catch (Exception ex)
-            {
-                // 蓝牙关闭或适配器不可用时保持旧数据
-                Log.Error("枚举蓝牙设备失败", ex);
-            }
 
-            // 派发出去就返回，不等结果：慢设备的结果由它自己完成后回填
             for (int i = 0; i < targets.Count; i++)
             {
                 StartDeviceRead(targets[i]);
@@ -204,39 +181,313 @@ namespace PeripheralBattery
         }
 
         /// <summary>
-        /// 启动一台设备的读取，读到结果后自己写回 <see cref="_devices"/> 并递增版本号。
-        /// 同一台设备同时只允许一个读取任务，避免上一轮还没回来又叠一次。
+        /// 全量发现：枚举已配对设备，为每台建立会话（BluetoothLEDevice + 连接状态订阅）。
+        /// 建立会话本身不发无线请求，只是拿到对象并挂上事件，所以即使设备关机也很快。
         /// </summary>
-        private void StartDeviceRead(DeviceInformation info)
+        private async Task DiscoverBleSessionsAsync()
+        {
+            DeviceInformationCollection all;
+            try
+            {
+                string selector = BluetoothLEDevice.GetDeviceSelectorFromPairingState(true);
+                all = await AwaitAsync(
+                    DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
+                    DateTime.Now.AddMilliseconds(EnumerationBudgetMs)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // 蓝牙关闭或适配器不可用时保持旧数据
+                Log.Error("枚举蓝牙设备失败", ex);
+                return;
+            }
+
+            List<Task> creates = new List<Task>();
+            List<string> seen = new List<string>();
+            foreach (DeviceInformation info in all)
+            {
+                seen.Add(info.Id);
+                creates.Add(EnsureSessionAsync(info));
+            }
+
+            if (creates.Count > 0)
+            {
+                await Task.WhenAny(
+                    Task.WhenAll(creates.ToArray()),
+                    Task.Delay(EnumerationBudgetMs)).ConfigureAwait(false);
+            }
+
+            // 已经不再配对的设备，会话一并清掉
+            List<string> dropped = new List<string>();
+            lock (_lock)
+            {
+                foreach (string id in _sessions.Keys)
+                {
+                    if (!seen.Contains(id))
+                    {
+                        dropped.Add(id);
+                    }
+                }
+            }
+
+            foreach (string id in dropped)
+            {
+                RemoveSession(id);
+            }
+
+            if (all.Count != _lastBleCount)
+            {
+                _lastBleCount = all.Count;
+                int connectedCount = 0;
+                lock (_lock)
+                {
+                    foreach (BleSession session in _sessions.Values)
+                    {
+                        if (IsConnected(session))
+                        {
+                            connectedCount++;
+                        }
+                    }
+                }
+
+                Log.Write("枚举到 " + all.Count + " 个已配对 BLE 设备，其中已连接 " + connectedCount + " 个");
+            }
+        }
+
+        private async Task EnsureSessionAsync(DeviceInformation info)
         {
             lock (_lock)
             {
-                if (!_inflight.Add(info.Id))
+                if (_sessions.ContainsKey(info.Id))
+                {
+                    return;
+                }
+            }
+
+            BluetoothLEDevice device = null;
+            try
+            {
+                DateTime deadline = DateTime.Now.AddMilliseconds(EnumerationBudgetMs);
+                ulong address;
+                if (TryParseAddress(info.Id, out address))
+                {
+                    device = await AwaitAsync(
+                        BluetoothLEDevice.FromBluetoothAddressAsync(address), deadline).ConfigureAwait(false);
+                }
+
+                if (device == null)
+                {
+                    device = await AwaitAsync(
+                        BluetoothLEDevice.FromIdAsync(info.Id), deadline).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                // 单个设备拿不到对象不影响其他设备
+            }
+
+            if (device == null)
+            {
+                return;
+            }
+
+            BleSession session = new BleSession();
+            session.Id = info.Id;
+            session.Name = string.IsNullOrEmpty(info.Name) ? "未知设备" : info.Name;
+            session.Device = device;
+
+            string id = info.Id;
+            session.Handler = delegate(BluetoothLEDevice sender, object args)
+            {
+                OnConnectionStatusChanged(id);
+            };
+
+            try
+            {
+                // 需要引用 Facades\System.Runtime.InteropServices.WindowsRuntime.dll，
+                // 否则直接编译 winmd 时该事件不会投影成 C# event（CS1545）
+                device.ConnectionStatusChanged += session.Handler;
+            }
+            catch
+            {
+                device.Dispose();
+                return;
+            }
+
+            bool duplicate = false;
+            lock (_lock)
+            {
+                if (_sessions.ContainsKey(id))
+                {
+                    duplicate = true;
+                }
+                else
+                {
+                    _sessions[id] = session;
+                }
+            }
+
+            if (duplicate)
+            {
+                try
+                {
+                    device.ConnectionStatusChanged -= session.Handler;
+                }
+                catch
+                {
+                }
+
+                device.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 设备连上/断开时由 WinRT 线程池回调。
+        /// 连上就立刻读一次，断开就从列表移除——不用等下一轮刷新去"猜"。
+        /// </summary>
+        private void OnConnectionStatusChanged(string id)
+        {
+            BleSession session;
+            lock (_lock)
+            {
+                if (!_sessions.TryGetValue(id, out session))
+                {
+                    return;
+                }
+            }
+
+            bool connected = IsConnected(session);
+            if (connected)
+            {
+                StartDeviceRead(session);
+                return;
+            }
+
+            lock (_lock)
+            {
+                _devices.Remove(id);
+            }
+
+            // 服务和特征在断开时释放，设备对象和订阅保留，等它下次连上
+            ReleaseGatt(session);
+            _version++;
+        }
+
+        private static bool IsConnected(BleSession session)
+        {
+            if (session == null || session.Device == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return session.Device.ConnectionStatus == BluetoothConnectionStatus.Connected;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ReleaseGatt(BleSession session)
+        {
+            if (session.Service != null)
+            {
+                try
+                {
+                    session.Service.Dispose();
+                }
+                catch
+                {
+                }
+
+                session.Service = null;
+            }
+
+            session.Level = null;
+            session.PowerState = null;
+            session.LevelStatus = null;
+        }
+
+        private void RemoveSession(string id)
+        {
+            BleSession session;
+            lock (_lock)
+            {
+                if (!_sessions.TryGetValue(id, out session))
+                {
+                    return;
+                }
+
+                _sessions.Remove(id);
+                _devices.Remove(id);
+            }
+
+            ReleaseGatt(session);
+
+            if (session.Device != null)
+            {
+                try
+                {
+                    if (session.Handler != null)
+                    {
+                        session.Device.ConnectionStatusChanged -= session.Handler;
+                    }
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    session.Device.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            _version++;
+        }
+
+        /// <summary>
+        /// 启动一台设备的读取，读到结果后自己写回 <see cref="_devices"/> 并递增版本号。
+        /// 同一台设备同时只允许一个读取任务，避免上一轮还没回来又叠一次。
+        /// </summary>
+        private void StartDeviceRead(BleSession session)
+        {
+            lock (_lock)
+            {
+                if (!_inflight.Add(session.Id))
                 {
                     return;
                 }
             }
 
             // 故意不 await：慢设备自己读完自己回填，不许拖住本轮刷新
-            Task ignored = ReadAndApplyAsync(info);
+            Task ignored = ReadAndApplyAsync(session);
         }
 
-        private async Task ReadAndApplyAsync(DeviceInformation info)
+        private async Task ReadAndApplyAsync(BleSession session)
         {
             try
             {
-                ReadResult result = await ReadBatteryPercentAsync(info.Id).ConfigureAwait(false);
-                ApplyResult(info, result);
+                ReadResult result = await ReadBatteryPercentAsync(session).ConfigureAwait(false);
+                ApplyResult(session, result);
             }
             catch (Exception ex)
             {
-                Log.Error("读取设备电量失败：" + info.Name, ex);
+                Log.Error("读取设备电量失败：" + session.Name, ex);
             }
             finally
             {
                 lock (_lock)
                 {
-                    _inflight.Remove(info.Id);
+                    _inflight.Remove(session.Id);
                 }
 
                 // 结果落地后让 UI 尽快刷新，不用等下一轮
@@ -290,41 +541,39 @@ namespace PeripheralBattery
             }
         }
 
-        private void ApplyResult(DeviceInformation info, ReadResult result)
+        private void ApplyResult(BleSession session, ReadResult result)
         {
             lock (_lock)
             {
                 if (result.Percent < 0)
                 {
                     // 读不到就不进列表，已经在列表里的也移出去：
-                    // 关机/休眠设备不该占一个「未连接」条目，也不该每轮都去碰它。
-                    // 等下一次全量扫描（定时兜底、插拔通知、菜单重扫）再发现它。
-                    bool wasShown = _devices.Remove(info.Id);
-                    _supported.Remove(info.Id);
+                    // 关机/休眠设备不该占一个「未连接」条目。
+                    bool wasShown = _devices.Remove(session.Id);
 
-                    // 定时全量扫描每分钟都会走到这里，同一台设备只记一次，
-                    // 否则一天下来光这一行就是几千条
-                    if (wasShown || _reportedFailure.Add(info.Id))
+                    // 同一台设备只记一次，避免反复刷日志
+                    if (wasShown || _reportedFailure.Add(session.Id))
                     {
                         Log.Write("未读到电量，" + (wasShown ? "移出列表：" : "不显示：")
-                            + info.Name + "（" + result.Error + "）");
+                            + session.Name + "（" + result.Error + "）");
                     }
 
                     return;
                 }
 
-                _reportedFailure.Remove(info.Id);
+                _reportedFailure.Remove(session.Id);
 
+                bool isNew = !_devices.ContainsKey(session.Id);
                 DeviceBattery item;
-                if (!_devices.TryGetValue(info.Id, out item))
+                if (!_devices.TryGetValue(session.Id, out item))
                 {
                     item = new DeviceBattery();
-                    item.Id = info.Id;
+                    item.Id = session.Id;
                     item.Kind = DeviceKind.BluetoothLE;
-                    _devices[info.Id] = item;
+                    _devices[session.Id] = item;
                 }
 
-                item.Name = string.IsNullOrEmpty(info.Name) ? "未知设备" : info.Name;
+                item.Name = session.Name;
                 item.Percent = result.Percent;
                 item.Online = true;
                 item.Supported = true;
@@ -332,7 +581,12 @@ namespace PeripheralBattery
                 item.Full = result.Full;
                 item.UpdatedAt = DateTime.Now;
                 item.Error = null;
-                _supported.Add(info.Id);
+
+                if (isNew)
+                {
+                    Log.Write("已读到：" + session.Name + " " + result.Percent + "%"
+                        + (result.Charging ? "（充电中）" : (result.Full ? "（已充满）" : "")));
+                }
             }
         }
 
@@ -345,27 +599,57 @@ namespace PeripheralBattery
         }
 
         /// <summary>
+        /// 一台 BLE 设备的会话。设备对象和连接状态订阅在整个进程生命周期内保留，
+        /// GATT 服务与特征只在连接期间持有（断开时 ReleaseGatt 释放）。
+        /// </summary>
+        private sealed class BleSession
+        {
+            public string Id;
+            public string Name;
+            public BluetoothLEDevice Device;
+            public GattDeviceService Service;
+            public GattCharacteristic Level;        // 0x2A19 Battery Level
+            public GattCharacteristic PowerState;   // 0x2A1A Battery Power State
+            public GattCharacteristic LevelStatus;  // 0x2BED Battery Level Status
+            public Windows.Foundation.TypedEventHandler<BluetoothLEDevice, object> Handler;
+        }
+
+        /// <summary>
+        /// 从服务里按 UUID 取特征。GetCharacteristics(uuid) 读的是系统缓存的 GATT 数据库，
+        /// 不发无线请求；设备不可达时返回空列表。
+        /// 同步版本已被标记过时（建议用 GetCharacteristicsForUuidAsync），
+        /// 但异步版会发起无线往返，这里就是要"不发请求"，所以继续用同步版。
+        /// </summary>
+#pragma warning disable 0618
+        private static GattCharacteristic FindCharacteristic(GattDeviceService service, Guid uuid)
+        {
+            try
+            {
+                IReadOnlyList<GattCharacteristic> list = service.GetCharacteristics(uuid);
+                if (list != null && list.Count > 0)
+                {
+                    return list[0];
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+#pragma warning restore 0618
+
+        /// <summary>
         /// 读取标准 BLE 充电状态：0x2A1A Battery Power State（优先）
         /// 或 0x2BED Battery Level Status。两者都是可选特征，失败不影响电量。
         /// </summary>
         private static async Task ReadChargeStateAsync(
-            IReadOnlyList<GattCharacteristic> characteristics, ReadResult result, DateTime deadline)
+            BleSession session, ReadResult result, DateTime deadline)
         {
             try
             {
-                GattCharacteristic powerState = null;
-                GattCharacteristic levelStatus = null;
-                foreach (GattCharacteristic characteristic in characteristics)
-                {
-                    if (characteristic.Uuid == BatteryPowerStateUuid)
-                    {
-                        powerState = characteristic;
-                    }
-                    else if (characteristic.Uuid == BatteryLevelStatusUuid)
-                    {
-                        levelStatus = characteristic;
-                    }
-                }
+                GattCharacteristic powerState = session.PowerState;
+                GattCharacteristic levelStatus = session.LevelStatus;
 
                 if (powerState != null)
                 {
@@ -419,103 +703,82 @@ namespace PeripheralBattery
             }
         }
 
-        private static async Task<ReadResult> ReadBatteryPercentAsync(string deviceId)
+        private async Task<ReadResult> ReadBatteryPercentAsync(BleSession session)
         {
             ReadResult result = new ReadResult();
             result.Percent = -1;
-            BluetoothLEDevice device = null;
 
-            // 整台设备共用一个截止时间：关机设备每段 WinRT 调用都要等系统超时，
-            // 逐段相加能到三十多秒，必须整体封顶
+            BluetoothLEDevice device = session.Device;
+            if (device == null)
+            {
+                result.Error = "会话已释放";
+                return result;
+            }
+
+            // 只读已连接的设备：未连接时一个字节都不发，直接返回。
+            // 以前是先发请求再等 8 秒超时才知道设备不在，这是"扫关机设备"的根源。
+            if (!IsConnected(session))
+            {
+                result.Error = "设备未连接";
+                return result;
+            }
+
             DateTime deadline = DateTime.Now.AddMilliseconds(DeviceBudgetMs);
-
-            // GattDeviceService 各自持有一个设备句柄，必须逐个 Dispose。
-            // 之前只 Dispose 了 BluetoothLEDevice，这些服务对象一直挂到 GC 才释放，
-            // 每轮刷新就漏掉一批句柄（Xbox 这类设备一次能开出十来个 GATT 服务）。
-            List<GattDeviceService> openedServices = new List<GattDeviceService>();
 
             try
             {
-                ulong address;
-                if (TryParseAddress(deviceId, out address))
+                // 服务和特征只在连接期间发现一次，之后每轮只发一次读请求。
+                // GetGattService / GetCharacteristics 读的是系统缓存的 GATT 数据库，
+                // 不会发起无线往返；设备不可达时返回 null 而不是等超时。
+                if (session.Level == null)
                 {
-                    device = await AwaitAsync(
-                        BluetoothLEDevice.FromBluetoothAddressAsync(address), deadline).ConfigureAwait(false);
-                }
-
-                if (device == null)
-                {
-                    device = await AwaitAsync(
-                        BluetoothLEDevice.FromIdAsync(deviceId), deadline).ConfigureAwait(false);
-                }
-
-                if (device == null)
-                {
-                    result.Error = "设备不可达";
-                    return result;
-                }
-
-                // 用缓存服务列表快速找到电池服务（未连接设备也能返回），但读值必须走 Uncached
-                GattDeviceServicesResult services = await AwaitAsync(
-                    device.GetGattServicesAsync(), deadline).ConfigureAwait(false);
-
-                if (services.Status != GattCommunicationStatus.Success)
-                {
-                    result.Error = "GATT 服务读取失败：" + services.Status;
-                    return result;
-                }
-
-                GattDeviceService batteryService = null;
-                foreach (GattDeviceService service in services.Services)
-                {
-                    openedServices.Add(service);
-                    if (service.Uuid == BatteryServiceUuid)
+                    GattDeviceService service = null;
+                    try
                     {
-                        batteryService = service;
+                        // 同步版读系统缓存，不发无线往返；异步版会真的去问设备
+#pragma warning disable 0618
+                        service = device.GetGattService(BatteryServiceUuid);
+#pragma warning restore 0618
                     }
-                }
-
-                if (batteryService == null)
-                {
-                    result.Error = "设备没有标准电池服务";
-                    return result;
-                }
-
-                GattCharacteristicsResult characteristics = await AwaitAsync(
-                    batteryService.GetCharacteristicsAsync(), deadline).ConfigureAwait(false);
-
-                if (characteristics.Status != GattCommunicationStatus.Success)
-                {
-                    result.Error = "特征读取失败：" + characteristics.Status;
-                    return result;
-                }
-
-                GattCharacteristic batteryLevel = null;
-                foreach (GattCharacteristic characteristic in characteristics.Characteristics)
-                {
-                    if (characteristic.Uuid == BatteryLevelUuid)
+                    catch
                     {
-                        batteryLevel = characteristic;
-                        break;
+                        service = null;
                     }
+
+                    if (service == null)
+                    {
+                        result.Error = "设备没有标准电池服务";
+                        return result;
+                    }
+
+                    GattCharacteristic level = FindCharacteristic(service, BatteryLevelUuid);
+                    if (level == null)
+                    {
+                        result.Error = "电池服务中没有电量特征";
+                        try
+                        {
+                            service.Dispose();
+                        }
+                        catch
+                        {
+                        }
+
+                        return result;
+                    }
+
+                    session.Service = service;
+                    session.Level = level;
+                    session.PowerState = FindCharacteristic(service, BatteryPowerStateUuid);
+                    session.LevelStatus = FindCharacteristic(service, BatteryLevelStatusUuid);
                 }
 
-                if (batteryLevel == null)
-                {
-                    result.Error = "电池服务中没有电量特征";
-                    return result;
-                }
-
-                // 只认实时值：未连接/休眠的设备会返回 Unreachable，此时标记离线，
-                // 绝不回退到 Cached（缓存值可能是几天前的历史数据）。
+                // 只认实时值：不回退 Cached（缓存值可能是几天前的历史数据）
                 GattReadResult read = await AwaitAsync(
-                    batteryLevel.ReadValueAsync(BluetoothCacheMode.Uncached), deadline).ConfigureAwait(false);
+                    session.Level.ReadValueAsync(BluetoothCacheMode.Uncached), deadline).ConfigureAwait(false);
 
                 if (read.Status != GattCommunicationStatus.Success)
                 {
-                    result.Error = device.ConnectionStatus == BluetoothConnectionStatus.Disconnected
-                        ? "设备未连接（" + read.Status + "）"
-                        : "电量读取失败：" + read.Status;
+                    result.Error = "电量读取失败：" + read.Status;
                     return result;
                 }
 
@@ -524,7 +787,7 @@ namespace PeripheralBattery
                 result.Percent = value > 100 ? 100 : value;
 
                 // 可选：读取标准充电状态特征
-                await ReadChargeStateAsync(characteristics.Characteristics, result, deadline).ConfigureAwait(false);
+                await ReadChargeStateAsync(session, result, deadline).ConfigureAwait(false);
                 return result;
             }
             catch (TimeoutException)
@@ -535,26 +798,10 @@ namespace PeripheralBattery
             catch (Exception ex)
             {
                 result.Error = ex.GetType().Name + "：" + ex.Message;
-                return result;
-            }
-            finally
-            {
-                foreach (GattDeviceService service in openedServices)
-                {
-                    try
-                    {
-                        service.Dispose();
-                    }
-                    catch
-                    {
-                        // 设备已经掉线时 Dispose 也可能抛，忽略即可
-                    }
-                }
 
-                if (device != null)
-                {
-                    device.Dispose();
-                }
+                // 连接可能已经失效，下次重新发现服务
+                ReleaseGatt(session);
+                return result;
             }
         }
 

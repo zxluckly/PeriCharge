@@ -44,6 +44,10 @@ build.bat
 产物：`bin\PeripheralBattery.exe`，程序图标取自 `src\app.ico`（由 `/win32icon` 内嵌，
 含 16/20/24/32/40/48/64/128/256 九种尺寸）。
 
+编译命令行里有一条容易被忽略的引用：`Facades\System.Runtime.InteropServices.WindowsRuntime.dll`。
+直接对着 `Windows.winmd` 编译时，`ConnectionStatusChanged` 不会被投影成 C# 事件（报 CS1545 / CS0571），
+加上这个 facade 引用才能正常用 `+=` 订阅。
+
 ## 运行
 
 直接双击 `bin\PeripheralBattery.exe`。程序为单实例，配置和日志保存在：
@@ -55,12 +59,15 @@ build.bat
 
 首次启动先读 HID 手柄并立即显示（实测 1 秒内出数据），再枚举已配对的 BLE 设备。
 
-**刷新不等待慢设备**：一轮刷新只做「HID 读取 + BLE 枚举 + 派发」，实测 50 ms 左右就结束；
+**刷新不等待慢设备**：一轮刷新只做「HID 读取 + BLE 枚举 + 派发」，实测 50~270 ms 就结束；
 每台 BLE 设备的结果读到后自己回填界面，关机设备等满超时也只影响它自己，不会拖住整轮。
+
+**只碰连着的设备**：每台已配对的 BLE 设备会建一个会话，并订阅系统的 `ConnectionStatusChanged` 事件。
+每轮刷新只给 `ConnectionStatus == Connected` 的会话派发读取，没连上的设备一次无线请求都不发。
+设备连上时事件立刻触发一次读取，断开时立刻从列表移除，不必等下一轮轮询。
 
 **列表只放读得到电量的设备**：读不到（关机、休眠、无标准电池服务）的设备不显示，
 已经显示的设备一旦读不到也会立即移出，不会留一个「未连接」占位。
-平时只刷新列表里的设备；关机设备不再每轮都碰，靠低频全量扫描发现它重新上线。
 
 `log.txt` 超过 1 MB 会自动轮转为 `log.1.txt`（只保留一份备份），长期运行不会无限增长。
 刷新耗时超过 3 秒时会在日志里留一条 `刷新耗时 xxx ms`，正常情况下不写。
@@ -71,9 +78,18 @@ build.bat
 - WPF `AllowsTransparency` 提供逐像素透明与圆角；任务栏隐藏/显示、移动随父窗口自动同步，无需轮询
 - 资源管理器重启会连带销毁任务栏的所有子窗口（WPF `Window` 随之变为已关闭、无法再 `Show`）。程序用独立的隐藏窗口监听 `TaskbarCreated` 广播，自动重建悬浮条并重新挂载到新任务栏，不会崩溃
 - 悬停时背景加深并显示刷新按钮；背景与文字颜色跟随系统深浅色主题
-- 电量读取使用 WinRT `BluetoothLEDevice` + GATT，先缓存模式发现服务、再通过 Uncached 读取实时值；**不会把系统缓存值当作实时电量**
-- BLE 读取是「派发即返回」：`RefreshAsync` 不 await 各设备，读得慢的设备自己回填并递增版本号，UI 一秒内跟上。整台设备共用 8 秒截止时间，避免逐段超时累加到三十多秒
-- `GattDeviceService` 用完逐个 `Dispose`——每个都持有设备句柄，只 Dispose `BluetoothLEDevice` 不够，句柄会随每轮刷新累积
+- 电量读取使用 WinRT `BluetoothLEDevice` + GATT。每台设备建一个会话，会话里缓存 `GattDeviceService`
+  与三个特征（`0x2A19` 电量、`0x2A1A` 电源状态、`0x2BED` 电量状态），只在首次读取时发现一次，之后每轮直接 `ReadValueAsync`
+- 读取前先判 `ConnectionStatus`：设备没连上直接跳过，不发任何无线请求。这是 Xbox 手柄从「一直读不到」
+  变成「稳定读到」的关键——之前对已断开的设备反复发起 GATT 读取，每次都要等满超时
+- 订阅 `ConnectionStatusChanged`：连上即读、断开即移出列表，状态变化不再依赖轮询周期
+- 服务与特征用同步 API 发现（`GetGattService` / `GetCharacteristics`），读的是系统缓存、不发无线往返；
+  异步版会真的去问设备，反而更慢
+- 电量值本身仍以 `BluetoothCacheMode.Uncached` 读取，**不会把系统缓存值当作实时电量**
+- BLE 读取是「派发即返回」：`RefreshAsync` 不 await 各设备，读得慢的设备自己回填并递增版本号，UI 一秒内跟上。
+  整台设备共用 8 秒截止时间，避免逐段超时累加到三十多秒
+- `GattDeviceService` 在设备断开或会话销毁时 `Dispose`——每个都持有设备句柄，
+  只 Dispose `BluetoothLEDevice` 不够，句柄会随每轮刷新累积
 - DualSense 通过 SetupAPI 找到 HID 游戏手柄接口，读取 Input Report：低 4 位是电量档位（每档约 10%），高 4 位是充电状态（0 放电 / 1 充电 / 2 充满 / A、B 异常 / F 错误）
 - 同一手柄同时插 USB 又连着蓝牙时，Windows 会暴露两个 HID 节点，程序会把它们合并成一个，保留 USB 读数；两个节点都在时只读 USB，读不到才退到蓝牙
 - HID 枚举结果会缓存，靠 `WM_DEVICECHANGE` 通知失效，不必每轮把系统里所有 HID 接口都打开一遍
