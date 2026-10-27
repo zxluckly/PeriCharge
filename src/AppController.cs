@@ -68,7 +68,7 @@ namespace PeripheralBattery
         private WpfOverlay CreateOverlay()
         {
             WpfOverlay overlay = new WpfOverlay();
-            overlay.RefreshRequested += delegate { StartRefresh(); };
+            overlay.RefreshRequested += delegate { StartRefresh(true); };
             overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
             return overlay;
         }
@@ -100,8 +100,7 @@ namespace PeripheralBattery
             }
 
             _lastDeviceChange = DateTime.Now;
-            _service.RequestFullScan();
-            StartRefresh();
+            StartRefresh(true);
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -123,11 +122,28 @@ namespace PeripheralBattery
             }
         }
 
+        /// <summary>定时刷新：只刷新当前列表里的设备，不做全量扫描。</summary>
         private void StartRefresh()
+        {
+            StartRefresh(false);
+        }
+
+        /// <summary>
+        /// 触发一次刷新。
+        /// <paramref name="userInitiated"/> 为 true 时（点悬浮条按钮、菜单「立即刷新」/「重新扫描设备」）
+        /// 顺带做一次全量扫描——用户点了刷新就是希望重新找一遍设备，
+        /// 不该被 60 秒的定时全量扫描节流挡住。
+        /// </summary>
+        private void StartRefresh(bool userInitiated)
         {
             if (_refreshing)
             {
                 return;
+            }
+
+            if (userInitiated)
+            {
+                _service.RequestFullScan();
             }
 
             _refreshing = true;
@@ -142,6 +158,19 @@ namespace PeripheralBattery
                 {
                     Log.Error("刷新电量失败", completed.Exception.GetBaseException());
                 }
+
+                // 刷新一结束就立刻反映一次，不用等下一秒的定时器
+                // （UpdateUi 会碰 WPF 和托盘，必须回到 UI 线程）
+                if (_exiting)
+                {
+                    return;
+                }
+
+                _app.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                {
+                    _lastVersion = _service.Version;
+                    UpdateUi();
+                }));
             });
         }
 
@@ -224,7 +253,7 @@ namespace PeripheralBattery
         {
             if (e.Button == Forms.MouseButtons.Left)
             {
-                StartRefresh();
+                StartRefresh(true);
             }
         }
 
@@ -307,15 +336,11 @@ namespace PeripheralBattery
             menu.Items.Add(new Forms.ToolStripSeparator());
 
             Forms.ToolStripMenuItem refreshItem = new Forms.ToolStripMenuItem("立即刷新");
-            refreshItem.Click += delegate { StartRefresh(); };
+            refreshItem.Click += delegate { StartRefresh(true); };
             menu.Items.Add(refreshItem);
 
             Forms.ToolStripMenuItem rescanItem = new Forms.ToolStripMenuItem("重新扫描设备");
-            rescanItem.Click += delegate
-            {
-                _service.RequestFullScan();
-                StartRefresh();
-            };
+            rescanItem.Click += delegate { StartRefresh(true); };
             menu.Items.Add(rescanItem);
 
             Forms.ToolStripMenuItem hidMenu = new Forms.ToolStripMenuItem("识别 HID 设备（VID/PID）");
