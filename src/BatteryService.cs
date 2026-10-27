@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,9 +29,26 @@ namespace PeripheralBattery
         /// <summary>读不到的设备退避多久再试（秒）。</summary>
         private const int RetryBackoffSeconds = 60;
 
+        /// <summary>
+        /// 单个 BLE 设备一次读取的总预算（毫秒）。
+        /// 关机设备的每次 WinRT 调用都要等系统超时，逐段相加能到三十多秒，
+        /// 所以整台设备共用一个截止时间，到点就放弃，别再往下走。
+        /// </summary>
+        private const int DeviceBudgetMs = 8000;
+
+        /// <summary>枚举已配对设备的预算（毫秒）。正常几十毫秒就返回，这里只防卡死。</summary>
+        private const int EnumerationBudgetMs = 1500;
+
+        /// <summary>一轮刷新超过这个耗时就打一条日志（毫秒）。</summary>
+        private const int SlowRefreshMs = 3000;
+
+        /// <summary>正在读取的设备，防止上一轮还没回来又发起一次。</summary>
+        private readonly HashSet<string> _inflight = new HashSet<string>();
+
         private volatile bool _scanAll;
         private volatile int _version;
         private int _busy;
+        private bool _loggedFirstRefresh;
 
         /// <summary>上次记录的已配对 BLE 设备数量，用于抑制重复日志（-1 表示还没记过）。</summary>
         private int _lastBleCount = -1;
@@ -77,6 +95,8 @@ namespace PeripheralBattery
                 return;
             }
 
+            Stopwatch watch = Stopwatch.StartNew();
+
             try
             {
                 // HID（DualSense 这类经典蓝牙手柄）是毫秒级返回的，先读并立刻发布一次，
@@ -84,6 +104,9 @@ namespace PeripheralBattery
                 await UpdateHidDevicesAsync().ConfigureAwait(false);
                 _version++;
 
+                // 这里只做「枚举 + 派发」，不等待各设备读回来：
+                // 关机设备单次要等十几秒，等它就是把整轮刷新一起拖住。
+                // 每台设备读到结果后自己 ApplyResult 并递增 _version，UI 一秒内自然刷新。
                 await UpdateBleDevicesAsync().ConfigureAwait(false);
 
                 if (_scanAll)
@@ -95,6 +118,15 @@ namespace PeripheralBattery
             {
                 Interlocked.Exchange(ref _busy, 0);
                 _version++;
+            }
+
+            watch.Stop();
+
+            // 只在首轮和超预算时记录，正常情况下一行都不写
+            if (!_loggedFirstRefresh || watch.ElapsedMilliseconds > SlowRefreshMs)
+            {
+                _loggedFirstRefresh = true;
+                Log.Write("刷新耗时 " + watch.ElapsedMilliseconds + " ms（HID + BLE 枚举与派发）");
             }
         }
 
@@ -108,7 +140,7 @@ namespace PeripheralBattery
                 string selector = BluetoothLEDevice.GetDeviceSelectorFromPairingState(true);
                 DeviceInformationCollection all = await AwaitAsync(
                     DeviceInformation.FindAllAsync(selector, new string[0], DeviceInformationKind.AssociationEndpoint),
-                    15000).ConfigureAwait(false);
+                    DateTime.Now.AddMilliseconds(EnumerationBudgetMs)).ConfigureAwait(false);
 
                 DateTime now = DateTime.Now;
                 foreach (DeviceInformation info in all)
@@ -153,14 +185,52 @@ namespace PeripheralBattery
                 Log.Error("枚举蓝牙设备失败", ex);
             }
 
-            // 设备之间互不依赖，并行读，避免串行累加各自的超时
-            Task[] tasks = new Task[targets.Count];
+            // 派发出去就返回，不等结果：慢设备的结果由它自己完成后回填
             for (int i = 0; i < targets.Count; i++)
             {
-                tasks[i] = UpdateDeviceAsync(targets[i]);
+                StartDeviceRead(targets[i]);
+            }
+        }
+
+        /// <summary>
+        /// 启动一台设备的读取，读到结果后自己写回 <see cref="_devices"/> 并递增版本号。
+        /// 同一台设备同时只允许一个读取任务，避免上一轮还没回来又叠一次。
+        /// </summary>
+        private void StartDeviceRead(DeviceInformation info)
+        {
+            lock (_lock)
+            {
+                if (!_inflight.Add(info.Id))
+                {
+                    return;
+                }
             }
 
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            // 故意不 await：慢设备自己读完自己回填，不许拖住本轮刷新
+            Task ignored = ReadAndApplyAsync(info);
+        }
+
+        private async Task ReadAndApplyAsync(DeviceInformation info)
+        {
+            try
+            {
+                ReadResult result = await ReadBatteryPercentAsync(info.Id).ConfigureAwait(false);
+                ApplyResult(info, result);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("读取设备电量失败：" + info.Name, ex);
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    _inflight.Remove(info.Id);
+                }
+
+                // 结果落地后让 UI 尽快刷新，不用等下一轮
+                _version++;
+            }
         }
 
         private async Task UpdateHidDevicesAsync()
@@ -209,10 +279,8 @@ namespace PeripheralBattery
             }
         }
 
-        private async Task UpdateDeviceAsync(DeviceInformation info)
+        private void ApplyResult(DeviceInformation info, ReadResult result)
         {
-                ReadResult result = await ReadBatteryPercentAsync(info.Id).ConfigureAwait(false);
-
             lock (_lock)
             {
                 bool known = _supported.Contains(info.Id);
@@ -281,7 +349,7 @@ namespace PeripheralBattery
         /// 或 0x2BED Battery Level Status。两者都是可选特征，失败不影响电量。
         /// </summary>
         private static async Task ReadChargeStateAsync(
-            IReadOnlyList<GattCharacteristic> characteristics, ReadResult result)
+            IReadOnlyList<GattCharacteristic> characteristics, ReadResult result, DateTime deadline)
         {
             try
             {
@@ -302,7 +370,7 @@ namespace PeripheralBattery
                 if (powerState != null)
                 {
                     GattReadResult read = await AwaitAsync(
-                        powerState.ReadValueAsync(BluetoothCacheMode.Uncached), 5000).ConfigureAwait(false);
+                        powerState.ReadValueAsync(BluetoothCacheMode.Uncached), deadline).ConfigureAwait(false);
 
                     if (read != null && read.Status == GattCommunicationStatus.Success
                         && read.Value.Length >= 1)
@@ -319,7 +387,7 @@ namespace PeripheralBattery
                 if (levelStatus != null)
                 {
                     GattReadResult read = await AwaitAsync(
-                        levelStatus.ReadValueAsync(BluetoothCacheMode.Uncached), 5000).ConfigureAwait(false);
+                        levelStatus.ReadValueAsync(BluetoothCacheMode.Uncached), deadline).ConfigureAwait(false);
 
                     if (read != null && read.Status == GattCommunicationStatus.Success
                         && read.Value.Length >= 2)
@@ -357,6 +425,10 @@ namespace PeripheralBattery
             result.Percent = -1;
             BluetoothLEDevice device = null;
 
+            // 整台设备共用一个截止时间：关机设备每段 WinRT 调用都要等系统超时，
+            // 逐段相加能到三十多秒，必须整体封顶
+            DateTime deadline = DateTime.Now.AddMilliseconds(DeviceBudgetMs);
+
             // GattDeviceService 各自持有一个设备句柄，必须逐个 Dispose。
             // 之前只 Dispose 了 BluetoothLEDevice，这些服务对象一直挂到 GC 才释放，
             // 每轮刷新就漏掉一批句柄（Xbox 这类设备一次能开出十来个 GATT 服务）。
@@ -368,13 +440,13 @@ namespace PeripheralBattery
                 if (TryParseAddress(deviceId, out address))
                 {
                     device = await AwaitAsync(
-                        BluetoothLEDevice.FromBluetoothAddressAsync(address), 10000).ConfigureAwait(false);
+                        BluetoothLEDevice.FromBluetoothAddressAsync(address), deadline).ConfigureAwait(false);
                 }
 
                 if (device == null)
                 {
                     device = await AwaitAsync(
-                        BluetoothLEDevice.FromIdAsync(deviceId), 10000).ConfigureAwait(false);
+                        BluetoothLEDevice.FromIdAsync(deviceId), deadline).ConfigureAwait(false);
                 }
 
                 if (device == null)
@@ -385,7 +457,7 @@ namespace PeripheralBattery
 
                 // 用缓存服务列表快速找到电池服务（未连接设备也能返回），但读值必须走 Uncached
                 GattDeviceServicesResult services = await AwaitAsync(
-                    device.GetGattServicesAsync(), 8000).ConfigureAwait(false);
+                    device.GetGattServicesAsync(), deadline).ConfigureAwait(false);
 
                 if (services.Status != GattCommunicationStatus.Success)
                 {
@@ -412,7 +484,7 @@ namespace PeripheralBattery
                 result.HasBatteryService = true;
 
                 GattCharacteristicsResult characteristics = await AwaitAsync(
-                    batteryService.GetCharacteristicsAsync(), 5000).ConfigureAwait(false);
+                    batteryService.GetCharacteristicsAsync(), deadline).ConfigureAwait(false);
 
                 if (characteristics.Status != GattCommunicationStatus.Success)
                 {
@@ -439,7 +511,7 @@ namespace PeripheralBattery
                 // 只认实时值：未连接/休眠的设备会返回 Unreachable，此时标记离线，
                 // 绝不回退到 Cached（缓存值可能是几天前的历史数据）。
                 GattReadResult read = await AwaitAsync(
-                    batteryLevel.ReadValueAsync(BluetoothCacheMode.Uncached), 8000).ConfigureAwait(false);
+                    batteryLevel.ReadValueAsync(BluetoothCacheMode.Uncached), deadline).ConfigureAwait(false);
 
                 if (read.Status != GattCommunicationStatus.Success)
                 {
@@ -454,7 +526,7 @@ namespace PeripheralBattery
                 result.Percent = value > 100 ? 100 : value;
 
                 // 可选：读取标准充电状态特征
-                await ReadChargeStateAsync(characteristics.Characteristics, result).ConfigureAwait(false);
+                await ReadChargeStateAsync(characteristics.Characteristics, result, deadline).ConfigureAwait(false);
                 return result;
             }
             catch (TimeoutException)
@@ -488,19 +560,39 @@ namespace PeripheralBattery
             }
         }
 
-        private static async Task<T> AwaitAsync<T>(Windows.Foundation.IAsyncOperation<T> operation, int timeoutMs)
+        /// <summary>
+        /// 等待一个 WinRT 异步操作，但不超过 deadline。
+        /// 超时后这里只是「不再等」，底层操作仍会自己跑完（最终返回 Unreachable 之类）。
+        /// 试过给它挂 CancellationToken 主动取消，实测句柄增长反而更快，
+        /// 所以维持放弃等待的写法，不主动取消。
+        /// </summary>
+        private static async Task<T> AwaitAsync<T>(Windows.Foundation.IAsyncOperation<T> operation, DateTime deadline)
         {
-            // 超时后这里只是「不再等」，底层操作仍会自己跑完（最终返回 Unreachable 之类）。
-            // 试过给它挂 CancellationToken 主动取消，实测句柄增长反而更快，
-            // 所以维持放弃等待的写法，不主动取消。
+            int remaining = RemainingMs(deadline);
+            if (remaining <= 0)
+            {
+                throw new TimeoutException();
+            }
+
             Task<T> task = System.WindowsRuntimeSystemExtensions.AsTask(operation);
-            Task completed = await Task.WhenAny(task, Task.Delay(timeoutMs)).ConfigureAwait(false);
+            Task completed = await Task.WhenAny(task, Task.Delay(remaining)).ConfigureAwait(false);
             if (completed != task)
             {
                 throw new TimeoutException();
             }
 
             return await task.ConfigureAwait(false);
+        }
+
+        private static int RemainingMs(DateTime deadline)
+        {
+            double left = (deadline - DateTime.Now).TotalMilliseconds;
+            if (left <= 0)
+            {
+                return 0;
+            }
+
+            return left > int.MaxValue ? int.MaxValue : (int)left;
         }
 
         private static bool TryParseAddress(string deviceId, out ulong address)
