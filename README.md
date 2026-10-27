@@ -23,7 +23,7 @@ Windows 托盘 + 任务栏悬浮条，实时显示蓝牙外设电量。
 
 ## 2.4G 接收器的实现路径
 
-参考 `参考网页/` 中的 WebHID 设备查看器，识别思路是：
+识别思路是：
 
 1. 用 SetupAPI 枚举 HID 接口，`HidD_GetAttributes` 读取 VID/PID，`HidP_GetCaps` 读取 UsagePage/Usage
 2. `UsagePage 0x01/0x02` 为鼠标、`0x01/0x06` 为键盘、`0xFF00+` 为厂商自定义集合
