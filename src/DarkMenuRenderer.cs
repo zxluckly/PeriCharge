@@ -91,7 +91,7 @@ namespace PeripheralBattery
                     iconRect,
                     device.Online ? UiTheme.TextSecondary : UiTheme.TextDisabled);
 
-                int stateWidth = 56;
+                int stateWidth = 88;
                 Rectangle nameRect = new Rectangle(
                     rect.Left + iconSize + 6,
                     rect.Top,
@@ -108,6 +108,15 @@ namespace PeripheralBattery
                         | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
                 string state = device.Online ? device.Percent + "%" : "未连接";
+                if (device.Online && device.Charging)
+                {
+                    state += " 充电";
+                }
+                else if (device.Online && device.Full)
+                {
+                    state += " 满";
+                }
+
                 Color stateColor = device.Online
                     ? UiTheme.BatteryColor(device.Percent)
                     : UiTheme.TextSecondary;

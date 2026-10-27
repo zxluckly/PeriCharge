@@ -178,8 +178,17 @@ namespace PeripheralBattery
             List<string> parts = new List<string>();
             foreach (DeviceBattery item in items)
             {
-                parts.Add(UiTheme.GetDisplayName(item.Name) + " "
-                    + (item.Online ? item.Percent + "%" : "未连接"));
+                string state = item.Online ? item.Percent + "%" : "未连接";
+                if (item.Online && item.Charging)
+                {
+                    state += "(充电)";
+                }
+                else if (item.Online && item.Full)
+                {
+                    state += "(满)";
+                }
+
+                parts.Add(UiTheme.GetDisplayName(item.Name) + " " + state);
             }
 
             string tooltip = parts.Count == 0

@@ -527,8 +527,18 @@ namespace PeripheralBattery
             pill.BorderBrush = new SolidColorBrush(Color.FromArgb(online ? (byte)84 : (byte)38, accent.R, accent.G, accent.B));
             pill.BorderThickness = new Thickness(1);
 
+            string valueText = online ? item.Percent + "%" : "未连接";
+            if (online && item.Charging)
+            {
+                valueText += " ⚡";
+            }
+            else if (online && item.Full)
+            {
+                valueText += " 满";
+            }
+
             TextBlock value = new TextBlock();
-            value.Text = online ? item.Percent + "%" : "未连接";
+            value.Text = valueText;
             value.FontFamily = new FontFamily("Segoe UI");
             value.FontSize = 12;
             value.FontWeight = FontWeights.SemiBold;

@@ -50,24 +50,26 @@ namespace PeripheralBattery
                 return null;
             }
 
-            // 蓝牙报告 78 字节，电量状态字节在 offset 54；USB 报告 64 字节在 offset 53
-            int statusIndex = report.Length >= 78 ? 54 : 53;
-            if (statusIndex >= report.Length)
+            // 蓝牙报告 78 字节（含 report ID）：电量字节 54、状态字节 55
+            // USB 报告 64 字节：电量字节 53、状态字节 54
+            int levelIndex = report.Length >= 78 ? 54 : 53;
+            if (levelIndex >= report.Length)
             {
                 Log.Write("DualSense 报告长度异常：" + report.Length);
                 return null;
             }
 
-            int status = report[statusIndex];
-            int capacity = status & 0x0F;
-            int chargingState = (status >> 4) & 0x0F;
+            int levelByte = report[levelIndex];
+            int statusByte = levelIndex + 1 < report.Length ? report[levelIndex + 1] : 0;
 
-            // capacity 为 0-10 档，每档 10%；个别固件直接上报 0-100
-            int percent = capacity <= 10 ? capacity * 10 : capacity;
-            if (percent > 100)
-            {
-                percent = 100;
-            }
+            // 协议参考 ds.evua.cc / hid-playstation：
+            // level 低 4 位为 0-10 档，每档 10% 再加 5%；bit5 表示已充满
+            // status bit3 表示正在充电，bit0 表示耳机已连接
+            int capacity = levelByte & 0x0F;
+            int percent = Math.Min(capacity * 10 + 5, 100);
+            bool full = (levelByte & 0x20) != 0;
+            bool charging = (statusByte & 0x08) != 0;
+            bool headphone = (statusByte & 0x01) != 0;
 
             DeviceBattery item = new DeviceBattery();
             item.Id = "hid:" + device.DevicePath;
@@ -79,7 +81,9 @@ namespace PeripheralBattery
             item.Online = true;
             item.Supported = true;
             item.UpdatedAt = DateTime.Now;
-            item.Charging = chargingState == 1 || chargingState == 2;
+            item.Charging = charging;
+            item.Full = full;
+            item.Error = headphone ? "耳机已连接" : null;
             return item;
         }
     }
