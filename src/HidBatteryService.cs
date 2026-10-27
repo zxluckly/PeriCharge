@@ -24,6 +24,9 @@ namespace PeripheralBattery
                 return result;
             }
 
+            List<DeviceBattery> items = new List<DeviceBattery>();
+            List<bool> usbFlags = new List<bool>();
+
             foreach (HidDeviceInfo device in devices)
             {
                 if (device.VendorId == 0x054C && device.ProductId == 0x0CE6
@@ -32,12 +35,82 @@ namespace PeripheralBattery
                     DeviceBattery item = ReadDualSense(device);
                     if (item != null)
                     {
-                        result.Add(item);
+                        items.Add(item);
+                        usbFlags.Add(IsUsbTransport(device.DevicePath));
                     }
                 }
             }
 
+            // 同一个手柄同时插着 USB 又连着蓝牙时，Windows 会为它暴露两个 HID 节点
+            // （一个 USB 的 VID_054C&PID_0CE6，一个蓝牙的 {00001124-...}_VID&0002054C_PID&0CE6），
+            // 两个都能读到电量，界面就会重复显示两个同名设备。
+            // 这里把「同型号、恰好一个 USB 一个蓝牙」的组合并成一个，保留 USB 读数
+            // （插线时 USB 报告才是权威值）。蓝牙同时连两个手柄的情况仍按两个显示。
+            Dictionary<string, List<int>> groups = new Dictionary<string, List<int>>();
+            for (int i = 0; i < items.Count; i++)
+            {
+                string key = items[i].Name;
+                List<int> group;
+                if (!groups.TryGetValue(key, out group))
+                {
+                    group = new List<int>();
+                    groups[key] = group;
+                }
+                group.Add(i);
+            }
+
+            bool[] keep = new bool[items.Count];
+            for (int i = 0; i < keep.Length; i++)
+            {
+                keep[i] = true;
+            }
+
+            foreach (List<int> group in groups.Values)
+            {
+                if (group.Count != 2)
+                {
+                    continue;
+                }
+
+                int usbAt = -1;
+                int btAt = -1;
+                foreach (int i in group)
+                {
+                    if (usbFlags[i])
+                    {
+                        usbAt = i;
+                    }
+                    else
+                    {
+                        btAt = i;
+                    }
+                }
+
+                if (usbAt >= 0 && btAt >= 0)
+                {
+                    keep[btAt] = false;
+                    Log.Write("同一手柄的 USB 与蓝牙节点已合并，保留 USB 读数：" + items[usbAt].Name);
+                }
+            }
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (keep[i])
+                {
+                    result.Add(items[i]);
+                }
+            }
+
             return result;
+        }
+
+        /// <summary>
+        /// 蓝牙 HID 的设备路径里带蓝牙 HID 服务 UUID {00001124-...}，USB 的是 VID_054C&amp;PID_0CE6。
+        /// </summary>
+        private static bool IsUsbTransport(string devicePath)
+        {
+            return devicePath == null
+                || devicePath.IndexOf("{00001124", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         private static byte s_lastLevelByte = 0xFF;
@@ -53,23 +126,31 @@ namespace PeripheralBattery
                 return null;
             }
 
-            // 完整报告：USB 是 0x01（64 字节，电量字节在 53），蓝牙是 0x31（78 字节，在 54）。
-            // 不能只按长度判断：蓝牙接入瞬间会收到一条 0x01、被补齐到 64 字节的报告，
-            // 按长度会被当成 USB 报告去读 53，那里是填充的 0x00，会显示成 5%。
+            // 电量字节：蓝牙报告 78 字节在 54，USB 报告 64 字节在 53。
+            // 只能按长度判断，不能按报告 ID：实测蓝牙节点回来的报告首字节也是 0x01，
+            // 按 ID 会把 78 字节的蓝牙报告当成 USB 报告去读 53，读到的是别的字段
+            // （日志里出现过 0x6C → 等级 12 这种非法值）。
             int reportId = report.Length > 0 ? report[0] : 0;
             int levelIndex;
-            if (reportId == 0x31 && report.Length >= 55)
+            if (report.Length >= 78)
             {
                 levelIndex = 54;
             }
-            else if (reportId == 0x01 && report.Length >= 54 && !IsEmptyBody(report))
+            else if (report.Length >= 54)
             {
                 levelIndex = 53;
             }
             else
             {
-                Log.Write("DualSense 报告无法识别：id=0x" + reportId.ToString("X2")
-                    + " len=" + report.Length);
+                Log.Write("DualSense 报告长度异常：" + report.Length);
+                return null;
+            }
+
+            // 连接/断开瞬间会收到报告体为空壳的报告（第 10 字节起全 0），
+            // 那种帧读到的电量字节是填充的 0，会显示成 5%
+            if (levelIndex == 53 && IsEmptyBody(report))
+            {
+                Log.Write("DualSense 收到空壳报告，已忽略：len=" + report.Length);
                 return null;
             }
 

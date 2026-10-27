@@ -534,7 +534,7 @@ namespace PeripheralBattery
             }
             else if (online && item.Full)
             {
-                valueText += " 满";
+                valueText += " ✓";
             }
 
             TextBlock value = new TextBlock();
