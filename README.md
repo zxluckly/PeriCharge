@@ -3,11 +3,17 @@
 Windows 10 / 11 下的轻量托盘工具：把外设电量直接摆在任务栏右侧。手柄、键盘、鼠标还剩多少电，
 一眼就能看到，不用切窗口，也不用装厂商驱动。
 
-![默认状态](docs/images/taskbar-overlay-1.png)
+## 状态预览
 
-*默认状态：背景完全透明，只留设备图标、名称和电量胶囊，不遮挡任务栏本身。*
+![任务栏悬浮条](docs/images/taskbar-overlay-1.png)
 
-![悬停状态](docs/images/taskbar-overlay-3.png)
+*任务栏悬浮条：DualSense 已充满（✦），R75Pro 剩余 86%。多台设备并排显示，不用切窗口。*
+
+![未悬停](docs/images/taskbar-overlay-2.png)
+
+*未悬停：背景完全透明，只留设备图标、名称和电量胶囊，不遮挡任务栏本身。*
+
+![悬停](docs/images/taskbar-overlay-3.png)
 
 *鼠标悬停：背景浮起、边缘出现描边，右侧多出一个刷新按钮。移开即恢复透明。*
 
