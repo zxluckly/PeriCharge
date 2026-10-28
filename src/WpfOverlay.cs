@@ -14,6 +14,12 @@ namespace PeripheralBattery
     /// </summary>
     internal sealed class WpfOverlay : Window
     {
+        /// <summary>
+        /// 设备超过这个数量就切成紧凑模式：只留图标，名称和电量挪进悬停面板。
+        /// 四台设备按「图标 + 名字 + 胶囊」排下来要 800 多像素，任务栏右边根本放不下。
+        /// </summary>
+        private const int CompactThreshold = 3;
+
         private readonly Border _root;
         private readonly StackPanel _content;
         private readonly Border _refreshButton;
@@ -24,10 +30,13 @@ namespace PeripheralBattery
         private readonly LinearGradientBrush _backgroundBrush;
         private readonly SolidColorBrush _borderBrush;
         private readonly uint _taskbarCreatedMessage;
+        private readonly DispatcherTimer _hoverTimer;
+        private readonly WpfDetailPanel _panel;
 
         private DeviceBattery[] _items = new DeviceBattery[0];
         private string _emptyText = "正在扫描蓝牙设备…";
         private bool _hovered;
+        private bool _compact;
         private bool _enabled;
         private int _hoverColorArgb;
         private int _hoverAlpha = Settings.DefaultHoverAlpha;
@@ -159,6 +168,16 @@ namespace PeripheralBattery
             _root.MouseEnter += delegate { SetHovered(true); };
             _root.MouseLeave += delegate { SetHovered(false); };
 
+            // 紧凑模式的详情面板：鼠标移上去才弹
+            _panel = new WpfDetailPanel();
+
+            // 鼠标从悬浮条挪到面板上时，悬浮条的 MouseLeave 会先到，
+            // 只靠进出事件会在半路把面板收掉。所以弹出后改成定时看光标位置：
+            // 只要还在悬浮条或面板上就保持，两边都不在才收。
+            _hoverTimer = new DispatcherTimer();
+            _hoverTimer.Interval = TimeSpan.FromMilliseconds(120);
+            _hoverTimer.Tick += OnHoverTimerTick;
+
             _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
             ApplyTheme();
         }
@@ -181,12 +200,27 @@ namespace PeripheralBattery
             AttachToTaskbar();
         }
 
+        protected override void OnClosed(EventArgs e)
+        {
+            // 面板是独立顶层窗口，不跟着悬浮条一起销毁，得手动关掉
+            _hoverTimer.Stop();
+            if (!_panel.IsDestroyed)
+            {
+                _panel.Close();
+            }
+
+            base.OnClosed(e);
+        }
+
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             // 作为 Shell_TrayWnd 的子窗口，任务栏销毁时会被级联销毁；
             // 收到销毁消息后标记不可用，避免后续 Show/定位抛异常。
             if (msg == NativeMethods.WM_DESTROY || msg == NativeMethods.WM_NCDESTROY)
             {
+                // 面板是独立的顶层窗口，不会被任务栏级联销毁，得自己收掉，
+                // 否则资源管理器重启后会留下一张无主的浮层
+                HideDetailPanel();
                 _destroyed = true;
                 _taskbar = IntPtr.Zero;
             }
@@ -218,6 +252,7 @@ namespace PeripheralBattery
             _enabled = enabled;
             if (!enabled)
             {
+                HideDetailPanel();
                 Hide();
                 return;
             }
@@ -240,6 +275,20 @@ namespace PeripheralBattery
             }
 
             RebuildContent();
+
+            // 面板开着的时候内容跟着刷新；设备掉到 3 台以内就不用面板了
+            if (_panel.IsVisible)
+            {
+                if (_compact)
+                {
+                    _panel.UpdateItems(_items);
+                }
+                else
+                {
+                    HideDetailPanel();
+                }
+            }
+
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
         }
 
@@ -370,10 +419,21 @@ namespace PeripheralBattery
                 0,
                 0,
                 NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+
+            // 面板贴着悬浮条放。定位是延后一轮做的（BeginInvoke），托盘区宽度又常变，
+            // 面板可能比悬浮条早一步落位，所以这里以最终位置为准再对齐一次
+            _panel.Reposition();
         }
 
         private void SetHovered(bool hovered)
         {
+            // 紧凑模式下鼠标常要从悬浮条挪到详情面板上，这一路不算「离开」，
+            // 否则面板刚弹出来就被自己收掉了。真正该收的时机交给 _hoverTimer 判断。
+            if (!hovered && _hovered && IsCursorInsidePanel())
+            {
+                return;
+            }
+
             if (_hovered == hovered)
             {
                 return;
@@ -384,7 +444,101 @@ namespace PeripheralBattery
             ApplyTheme();
             AnimateBackground(hovered);
             UpdateLayout();
+
+            // 面板贴在悬浮条上方，得等布局跑完（悬停时多出来的刷新按钮会改变宽度）
+            if (hovered)
+            {
+                ShowDetailPanel();
+            }
+            else
+            {
+                HideDetailPanel();
+            }
+
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+        }
+
+        private void ShowDetailPanel()
+        {
+            if (!_compact || _destroyed || !_enabled || _items.Length == 0)
+            {
+                return;
+            }
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            // 数据和主题都在 ShowAbove 里一次性重画，这里只管什么时候弹
+            _panel.ShowAbove(hwnd, _items);
+            _hoverTimer.Start();
+        }
+
+        private void HideDetailPanel()
+        {
+            _hoverTimer.Stop();
+            _panel.HidePanel();
+        }
+
+        /// <summary>
+        /// 光标已经离开「悬浮条 + 面板」这块区域时收掉面板。
+        /// 用定时器轮询而不是进出事件：两者相邻，鼠标跨越时事件顺序不可靠，
+        /// 会出现面板闪一下就没、或者移开了还不收的情况。
+        /// </summary>
+        private void OnHoverTimerTick(object sender, EventArgs e)
+        {
+            if (_destroyed || !_enabled)
+            {
+                HideDetailPanel();
+                return;
+            }
+
+            NativeMethods.POINT cursor;
+            if (!NativeMethods.GetCursorPos(out cursor))
+            {
+                return;
+            }
+
+            if (IsCursorInBar(cursor) || _panel.ContainsScreenPoint(cursor.X, cursor.Y))
+            {
+                return;
+            }
+
+            HideDetailPanel();
+
+            // 光标已经不在悬浮条上了，悬停样式（背景、刷新按钮）也一起收掉
+            SetHovered(false);
+        }
+
+        private bool IsCursorInBar(NativeMethods.POINT cursor)
+        {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            NativeMethods.RECT rect;
+            if (!NativeMethods.GetWindowRect(hwnd, out rect))
+            {
+                return false;
+            }
+
+            return cursor.X >= rect.Left && cursor.X < rect.Right
+                && cursor.Y >= rect.Top && cursor.Y < rect.Bottom;
+        }
+
+        private bool IsCursorInsidePanel()
+        {
+            NativeMethods.POINT cursor;
+            if (!NativeMethods.GetCursorPos(out cursor))
+            {
+                return false;
+            }
+
+            return _panel.ContainsScreenPoint(cursor.X, cursor.Y);
         }
 
         private void AnimateBackground(bool visible)
@@ -461,11 +615,19 @@ namespace PeripheralBattery
             _refreshButton.BorderBrush = new SolidColorBrush(Color.FromArgb(60, text.R, text.G, text.B));
             _refreshButton.BorderThickness = new Thickness(1);
             _refreshGlyph.Foreground = new SolidColorBrush(text);
+
+            // 详情面板跟着同一套配色走，主题一变两边一起换
+            _panel.SetStyle(_hoverColorArgb, _hoverAlpha);
         }
 
         private void RebuildContent()
         {
             _content.Children.Clear();
+
+            // 设备多了就把设备名去掉：四台按「图标 + 名字 + 胶囊」排下来要 800 多像素，
+            // 任务栏右边根本放不下，压成「图标 + 胶囊」能收到一半以内，
+            // 名字挪到悬停面板里看
+            _compact = _items.Length > CompactThreshold;
 
             if (_items.Length == 0)
             {
@@ -481,9 +643,12 @@ namespace PeripheralBattery
 
             for (int i = 0; i < _items.Length; i++)
             {
-                _content.Children.Add(CreateDeviceView(_items[i]));
+                bool last = i == _items.Length - 1;
+                _content.Children.Add(_compact
+                    ? CreateCompactDeviceView(_items[i])
+                    : CreateDeviceView(_items[i]));
 
-                if (i < _items.Length - 1)
+                if (!last)
                 {
                     System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse();
                     dot.Width = 2;
@@ -495,6 +660,35 @@ namespace PeripheralBattery
                     _content.Children.Add(dot);
                 }
             }
+        }
+
+        /// <summary>
+        /// 紧凑模式：只去掉设备名，图标和电量胶囊都留着。
+        /// 名字是最占宽度的部分（最长 180），砍掉它一台设备能从 270 收到 90 左右；
+        /// 电量必须留在条上 —— 否则得挨个悬停才知道谁快没电了，那就本末倒置了。
+        /// </summary>
+        private UIElement CreateCompactDeviceView(DeviceBattery item)
+        {
+            bool online = item.Online;
+            Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
+
+            StackPanel panel = new StackPanel();
+            panel.Orientation = Orientation.Horizontal;
+            panel.VerticalAlignment = VerticalAlignment.Center;
+
+            TextBlock icon = new TextBlock();
+            icon.Text = UiTheme.GetIconGlyph(item.Name);
+            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            icon.FontSize = 13;
+            icon.Foreground = new SolidColorBrush(online ? ToMediaColor(UiTheme.TextSecondary) : ToMediaColor(UiTheme.TextDisabled));
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            panel.Children.Add(icon);
+
+            Border pill = CreateBatteryPill(item, accent, online);
+            pill.Margin = new Thickness(6, 0, 0, 0);
+            panel.Children.Add(pill);
+
+            return panel;
         }
 
         private UIElement CreateDeviceView(DeviceBattery item)
@@ -509,7 +703,7 @@ namespace PeripheralBattery
             panel.VerticalAlignment = VerticalAlignment.Center;
 
             TextBlock icon = new TextBlock();
-            icon.Text = GetIconGlyph(item.Name);
+            icon.Text = UiTheme.GetIconGlyph(item.Name);
             icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
             icon.FontSize = 13;
             icon.Foreground = new SolidColorBrush(online ? secondary : ToMediaColor(UiTheme.TextDisabled));
@@ -527,10 +721,19 @@ namespace PeripheralBattery
             name.VerticalAlignment = VerticalAlignment.Center;
             panel.Children.Add(name);
 
+            Border pill = CreateBatteryPill(item, accent, online);
+            pill.Margin = new Thickness(8, 0, 0, 0);
+            panel.Children.Add(pill);
+
+            return panel;
+        }
+
+        /// <summary>电量胶囊，常规模式和紧凑模式共用同一套样式。</summary>
+        private static Border CreateBatteryPill(DeviceBattery item, Color accent, bool online)
+        {
             Border pill = new Border();
             pill.CornerRadius = new CornerRadius(9);
             pill.Padding = new Thickness(8, 1, 8, 1);
-            pill.Margin = new Thickness(8, 0, 0, 0);
             pill.VerticalAlignment = VerticalAlignment.Center;
             pill.Background = new SolidColorBrush(Color.FromArgb(online ? (byte)32 : (byte)16, accent.R, accent.G, accent.B));
             pill.BorderBrush = new SolidColorBrush(Color.FromArgb(online ? (byte)84 : (byte)38, accent.R, accent.G, accent.B));
@@ -554,35 +757,7 @@ namespace PeripheralBattery
             value.Foreground = new SolidColorBrush(accent);
             value.VerticalAlignment = VerticalAlignment.Center;
             pill.Child = value;
-            panel.Children.Add(pill);
-
-            return panel;
-        }
-
-        private static string GetIconGlyph(string name)
-        {
-            DeviceIconKind kind = UiTheme.GetIconKind(name);
-            if (kind == DeviceIconKind.Keyboard)
-            {
-                return "\uE765";
-            }
-
-            if (kind == DeviceIconKind.Mouse)
-            {
-                return "\uE962";
-            }
-
-            if (kind == DeviceIconKind.Gamepad)
-            {
-                return "\uE7FC";
-            }
-
-            if (kind == DeviceIconKind.Headset)
-            {
-                return "\uE7F6";
-            }
-
-            return "\uE7C3";
+            return pill;
         }
 
         private static Color ToMediaColor(System.Drawing.Color color)

@@ -126,8 +126,12 @@ namespace PeripheralBattery
         internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
 
         internal const int GWL_STYLE = -16;
+        internal const int GWL_EXSTYLE = -20;
         internal const int WS_CHILD = 0x40000000;
         internal const int WS_POPUP = unchecked((int)0x80000000);
+        // 详情面板是纯展示的浮层：不抢焦点、不在 Alt+Tab 里出现
+        internal const int WS_EX_NOACTIVATE = 0x08000000;
+        internal const int WS_EX_TOOLWINDOW = 0x00000080;
         internal const int WM_DISPLAYCHANGE = 0x007E;
         internal const int WM_SETTINGCHANGE = 0x001A;
         internal const uint SWP_NOZORDER = 0x0004;

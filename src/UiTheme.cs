@@ -172,6 +172,36 @@ namespace PeripheralBattery
             return DeviceIconKind.Generic;
         }
 
+        /// <summary>
+        /// 设备对应的 Segoe MDL2 Assets 字形，WPF 那边（悬浮条、详情面板）共用。
+        /// GDI 画的托盘图标走 <see cref="DrawDeviceIcon"/>，两边图标语义要对得上。
+        /// </summary>
+        internal static string GetIconGlyph(string name)
+        {
+            DeviceIconKind kind = GetIconKind(name);
+            if (kind == DeviceIconKind.Keyboard)
+            {
+                return "\uE765";
+            }
+
+            if (kind == DeviceIconKind.Mouse)
+            {
+                return "\uE962";
+            }
+
+            if (kind == DeviceIconKind.Gamepad)
+            {
+                return "\uE7FC";
+            }
+
+            if (kind == DeviceIconKind.Headset)
+            {
+                return "\uE7F6";
+            }
+
+            return "\uE7C3";
+        }
+
         internal static void DrawDeviceIcon(Graphics g, string deviceName, Rectangle bounds, Color color)
         {
             float scale = bounds.Width / 16f;
