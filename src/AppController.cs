@@ -70,7 +70,13 @@ namespace PeripheralBattery
             WpfOverlay overlay = new WpfOverlay();
             overlay.RefreshRequested += delegate { StartRefresh(true); };
             overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
+            overlay.SetCompactOptions(_settings.ForceCompact, _settings.CompactThreshold, _settings.CompactStyle);
             return overlay;
+        }
+
+        private void ApplyCompactSettings()
+        {
+            _overlay.SetCompactOptions(_settings.ForceCompact, _settings.CompactThreshold, _settings.CompactStyle);
         }
 
         private void OnTaskbarRecreated()
@@ -361,6 +367,8 @@ namespace PeripheralBattery
             };
             menu.Items.Add(taskbarItem);
 
+            menu.Items.Add(BuildCompactMenu());
+
             Forms.ToolStripMenuItem hoverMenu = new Forms.ToolStripMenuItem("悬停背景");
 
             Forms.ToolStripMenuItem hoverColorItem = new Forms.ToolStripMenuItem("选择颜色…");
@@ -416,6 +424,73 @@ namespace PeripheralBattery
             menu.Items.Add(exitItem);
 
             menu.PerformLayout();
+        }
+
+        /// <summary>
+        /// 「显示压缩」子菜单：是否强制、超过几台开始压缩、压缩后显示成什么样。
+        /// 设备一多，悬浮条按「图标 + 名称 + 胶囊」排下来能到 800 多像素，任务栏右边放不下。
+        /// </summary>
+        private Forms.ToolStripMenuItem BuildCompactMenu()
+        {
+            Forms.ToolStripMenuItem compactMenu = new Forms.ToolStripMenuItem("显示压缩");
+
+            Forms.ToolStripMenuItem forceItem = new Forms.ToolStripMenuItem("始终使用紧凑样式");
+            forceItem.CheckState = _settings.ForceCompact
+                ? Forms.CheckState.Checked
+                : Forms.CheckState.Unchecked;
+            forceItem.Click += delegate
+            {
+                _settings.ForceCompact = !_settings.ForceCompact;
+                _settings.Save();
+                ApplyCompactSettings();
+            };
+            compactMenu.DropDownItems.Add(forceItem);
+
+            compactMenu.DropDownItems.Add(new Forms.ToolStripSeparator());
+
+            Forms.ToolStripMenuItem thresholdMenu = new Forms.ToolStripMenuItem("设备超过 N 台时压缩");
+            // 勾了「始终」就不看数量，这项灰掉，免得以为设了没生效
+            thresholdMenu.Enabled = !_settings.ForceCompact;
+            for (int count = Settings.MinCompactThreshold; count <= Settings.MaxCompactThreshold; count++)
+            {
+                int captured = count;
+                Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(captured + " 台");
+                item.CheckState = _settings.CompactThreshold == captured
+                    ? Forms.CheckState.Checked
+                    : Forms.CheckState.Unchecked;
+                item.Click += delegate
+                {
+                    _settings.CompactThreshold = captured;
+                    _settings.Save();
+                    ApplyCompactSettings();
+                };
+                thresholdMenu.DropDownItems.Add(item);
+            }
+
+            compactMenu.DropDownItems.Add(thresholdMenu);
+            compactMenu.DropDownItems.Add(new Forms.ToolStripSeparator());
+
+            Forms.ToolStripMenuItem styleMenu = new Forms.ToolStripMenuItem("紧凑样式");
+            styleMenu.DropDownItems.Add(BuildCompactStyleItem("图标 + 电量胶囊", CompactStyle.IconAndBattery));
+            styleMenu.DropDownItems.Add(BuildCompactStyleItem("仅图标", CompactStyle.IconOnly));
+            compactMenu.DropDownItems.Add(styleMenu);
+
+            return compactMenu;
+        }
+
+        private Forms.ToolStripMenuItem BuildCompactStyleItem(string text, CompactStyle style)
+        {
+            Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(text);
+            item.CheckState = _settings.CompactStyle == style
+                ? Forms.CheckState.Checked
+                : Forms.CheckState.Unchecked;
+            item.Click += delegate
+            {
+                _settings.CompactStyle = style;
+                _settings.Save();
+                ApplyCompactSettings();
+            };
+            return item;
         }
 
         private void BuildHidMenu(Forms.ToolStripMenuItem hidMenu)

@@ -4,6 +4,16 @@ using System.IO;
 
 namespace PeripheralBattery
 {
+    /// <summary>紧凑模式下每台设备显示什么。</summary>
+    internal enum CompactStyle
+    {
+        /// <summary>图标 + 电量胶囊（默认）。</summary>
+        IconAndBattery = 0,
+
+        /// <summary>只有图标，电量靠悬停面板看。</summary>
+        IconOnly = 1
+    }
+
     internal sealed class Settings
     {
         public bool ShowTaskbar = true;
@@ -23,6 +33,20 @@ namespace PeripheralBattery
         private const int ConfigVersion = 2;
 
         public int HoverAlpha = DefaultHoverAlpha;
+
+        /// <summary>设备数超过这个值就自动切紧凑模式。</summary>
+        public const int DefaultCompactThreshold = 3;
+
+        /// <summary>阈值可选范围：2–6 台。再大任务栏本来也放不下。</summary>
+        public const int MinCompactThreshold = 2;
+        public const int MaxCompactThreshold = 6;
+
+        /// <summary>无视设备数量，一直用紧凑样式。</summary>
+        public bool ForceCompact = false;
+
+        public int CompactThreshold = DefaultCompactThreshold;
+
+        public CompactStyle CompactStyle = CompactStyle.IconAndBattery;
 
         private static string FolderPath
         {
@@ -105,6 +129,27 @@ namespace PeripheralBattery
                             settings.HoverAlpha = Math.Max(1, Math.Min(255, alpha));
                         }
                     }
+                    else if (key == "forceCompact")
+                    {
+                        settings.ForceCompact = value == "1";
+                    }
+                    else if (key == "compactThreshold")
+                    {
+                        int threshold;
+                        if (int.TryParse(value, out threshold))
+                        {
+                            settings.CompactThreshold = Math.Max(
+                                MinCompactThreshold, Math.Min(MaxCompactThreshold, threshold));
+                        }
+                    }
+                    else if (key == "compactStyle")
+                    {
+                        int style;
+                        if (int.TryParse(value, out style) && style == (int)CompactStyle.IconOnly)
+                        {
+                            settings.CompactStyle = CompactStyle.IconOnly;
+                        }
+                    }
                 }
 
                 // 旧版配置没有 configVersion。它的默认透明度是 230（约 90%），而 230
@@ -139,7 +184,10 @@ namespace PeripheralBattery
                     "refreshSeconds=" + RefreshSeconds,
                     "hiddenIds=" + string.Join("|", HiddenIds.ToArray()),
                     "hoverColor=" + HoverColorArgb,
-                    "hoverAlpha=" + HoverAlpha
+                    "hoverAlpha=" + HoverAlpha,
+                    "forceCompact=" + (ForceCompact ? "1" : "0"),
+                    "compactThreshold=" + CompactThreshold,
+                    "compactStyle=" + (int)CompactStyle
                 };
                 File.WriteAllLines(FilePath, lines);
             }

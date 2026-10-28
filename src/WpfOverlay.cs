@@ -14,12 +14,6 @@ namespace PeripheralBattery
     /// </summary>
     internal sealed class WpfOverlay : Window
     {
-        /// <summary>
-        /// 设备超过这个数量就切成紧凑模式：只留图标，名称和电量挪进悬停面板。
-        /// 四台设备按「图标 + 名字 + 胶囊」排下来要 800 多像素，任务栏右边根本放不下。
-        /// </summary>
-        private const int CompactThreshold = 3;
-
         private readonly Border _root;
         private readonly StackPanel _content;
         private readonly Border _refreshButton;
@@ -38,6 +32,15 @@ namespace PeripheralBattery
         private bool _hovered;
         private bool _compact;
         private bool _enabled;
+
+        /// <summary>无视设备数量，一直用紧凑样式。</summary>
+        private bool _forceCompact;
+
+        /// <summary>设备数超过这个值就自动切紧凑模式。</summary>
+        private int _compactThreshold = Settings.DefaultCompactThreshold;
+
+        /// <summary>紧凑模式下显示成什么样。</summary>
+        private CompactStyle _compactStyle = CompactStyle.IconAndBattery;
         private int _hoverColorArgb;
         private int _hoverAlpha = Settings.DefaultHoverAlpha;
         private bool _destroyed;
@@ -240,6 +243,36 @@ namespace PeripheralBattery
             // 下限留 1：完全透明的分层窗口不接收鼠标，悬浮条会变得既悬停不了也点不到
             _hoverAlpha = Math.Max(1, Math.Min(255, alpha));
             ApplyTheme();
+        }
+
+        /// <summary>
+        /// 压缩显示的三项设置：是否强制、超过几台开始压缩、压缩后显示成什么样。
+        /// </summary>
+        internal void SetCompactOptions(bool force, int threshold, CompactStyle style)
+        {
+            _forceCompact = force;
+            _compactThreshold = Math.Max(
+                Settings.MinCompactThreshold, Math.Min(Settings.MaxCompactThreshold, threshold));
+            _compactStyle = style;
+
+            if (_destroyed)
+            {
+                return;
+            }
+
+            RebuildContent();
+
+            if (!_compact)
+            {
+                // 刚从紧凑切回完整，面板就没用了
+                HideDetailPanel();
+            }
+            else if (_panel.IsVisible)
+            {
+                _panel.UpdateItems(_items);
+            }
+
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
         }
 
         internal void SetEnabled(bool enabled)
@@ -626,8 +659,8 @@ namespace PeripheralBattery
 
             // 设备多了就把设备名去掉：四台按「图标 + 名字 + 胶囊」排下来要 800 多像素，
             // 任务栏右边根本放不下，压成「图标 + 胶囊」能收到一半以内，
-            // 名字挪到悬停面板里看
-            _compact = _items.Length > CompactThreshold;
+            // 名字挪到悬停面板里看。阈值和是否强制都由设置决定
+            _compact = _forceCompact || _items.Length > _compactThreshold;
 
             if (_items.Length == 0)
             {
@@ -663,14 +696,26 @@ namespace PeripheralBattery
         }
 
         /// <summary>
-        /// 紧凑模式：只去掉设备名，图标和电量胶囊都留着。
-        /// 名字是最占宽度的部分（最长 180），砍掉它一台设备能从 270 收到 90 左右；
-        /// 电量必须留在条上 —— 否则得挨个悬停才知道谁快没电了，那就本末倒置了。
+        /// 紧凑模式：去掉设备名，图标保留，电量按设置显示成胶囊或者干脆不显示。
+        /// 名字是最占宽度的部分（最长 180），砍掉它一台设备能从 270 收到 90 左右。
         /// </summary>
         private UIElement CreateCompactDeviceView(DeviceBattery item)
         {
             bool online = item.Online;
             Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
+
+            if (_compactStyle == CompactStyle.IconOnly)
+            {
+                // 没有胶囊可读，就把电量体现在图标颜色上：
+                // 绿 / 琥珀 / 红扫一眼就知道，比逐个读数字快
+                TextBlock only = new TextBlock();
+                only.Text = UiTheme.GetIconGlyph(item.Name);
+                only.FontFamily = new FontFamily("Segoe MDL2 Assets");
+                only.FontSize = 14;
+                only.Foreground = new SolidColorBrush(online ? accent : ToMediaColor(UiTheme.TextDisabled));
+                only.VerticalAlignment = VerticalAlignment.Center;
+                return only;
+            }
 
             StackPanel panel = new StackPanel();
             panel.Orientation = Orientation.Horizontal;
