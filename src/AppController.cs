@@ -367,7 +367,7 @@ namespace PeripheralBattery
             hoverColorItem.Click += delegate { PickHoverColor(); };
             hoverMenu.DropDownItems.Add(hoverColorItem);
 
-            Forms.ToolStripMenuItem alphaMenu = new Forms.ToolStripMenuItem("透明度");
+            Forms.ToolStripMenuItem alphaMenu = new Forms.ToolStripMenuItem("不透明度");
             int[] percents = new int[] { 20, 40, 60, 80, 100 };
             foreach (int percent in percents)
             {
@@ -390,13 +390,13 @@ namespace PeripheralBattery
             hoverMenu.DropDownItems.Add(alphaMenu);
             hoverMenu.DropDownItems.Add(new Forms.ToolStripSeparator());
 
-            Forms.ToolStripMenuItem hoverResetItem = new Forms.ToolStripMenuItem("恢复默认（跟随主题）");
+            Forms.ToolStripMenuItem hoverResetItem = new Forms.ToolStripMenuItem("恢复默认（跟随系统颜色）");
             hoverResetItem.Click += delegate
             {
                 _settings.HoverColorArgb = 0;
-                _settings.HoverAlpha = 230;
+                _settings.HoverAlpha = Settings.DefaultHoverAlpha;
                 _settings.Save();
-                _overlay.SetHoverStyle(0, 230);
+                _overlay.SetHoverStyle(0, Settings.DefaultHoverAlpha);
             };
             hoverMenu.DropDownItems.Add(hoverResetItem);
 

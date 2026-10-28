@@ -30,7 +30,7 @@ namespace PeripheralBattery
         private bool _hovered;
         private bool _enabled;
         private int _hoverColorArgb;
-        private int _hoverAlpha = 230;
+        private int _hoverAlpha = Settings.DefaultHoverAlpha;
         private bool _destroyed;
         private IntPtr _taskbar;
         private HwndSource _source;
@@ -203,7 +203,8 @@ namespace PeripheralBattery
         internal void SetHoverStyle(int argb, int alpha)
         {
             _hoverColorArgb = argb;
-            _hoverAlpha = Math.Max(0, Math.Min(255, alpha));
+            // 下限留 1：完全透明的分层窗口不接收鼠标，悬浮条会变得既悬停不了也点不到
+            _hoverAlpha = Math.Max(1, Math.Min(255, alpha));
             ApplyTheme();
         }
 
@@ -417,8 +418,6 @@ namespace PeripheralBattery
 
         private void ApplyTheme()
         {
-            bool light = Theme.IsLight();
-            int alpha;
             Color top;
             Color bottom;
 
@@ -429,14 +428,15 @@ namespace PeripheralBattery
                 byte blue = (byte)(_hoverColorArgb & 0xFF);
                 top = Color.FromArgb(255, red, green, blue);
                 bottom = top;
-                alpha = _hoverAlpha;
             }
             else
             {
+                // 跟随系统只决定颜色，不透明度仍由用户设置决定
                 top = ToMediaColor(UiTheme.BackgroundTop);
                 bottom = ToMediaColor(UiTheme.BackgroundBottom);
-                alpha = light ? 246 : 240;
             }
+
+            int alpha = _hoverAlpha;
 
             if (_backgroundBrush.GradientStops.Count >= 2)
             {
