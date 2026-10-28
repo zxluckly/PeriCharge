@@ -332,14 +332,22 @@ namespace PeripheralBattery
                 }
             }
 
-            double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
-            if (scale <= 0)
+            // 尺寸不自己算：设备是陆续读到的（蓝牙先来、HID 后到、手柄开机才有电量），
+            // 内容宽度一直在变，而 SizeToContent 本来就会跟着内容重算窗口大小。
+            // 之前这里用 SetWindowPos 显式给宽高，等于和它抢方向盘 —— 它按内容算一个尺寸，
+            // 这里又按自己量出来的 DesiredSize 算另一个（DesiredSize 本身会被当前窗口宽度裁剪，
+            // 宽的时候量出 439，窄的时候量出 469），窗口就在两个宽度之间来回跳。
+            // 所以这里只强制跑完一次布局让窗口先长到内容需要的尺寸，再把结果读回来用于定位。
+            UpdateLayout();
+
+            NativeMethods.RECT windowRect;
+            if (!NativeMethods.GetWindowRect(hwnd, out windowRect))
             {
-                scale = 1;
+                return;
             }
 
-            int width = (int)Math.Ceiling(ActualWidth * scale);
-            int height = (int)Math.Ceiling(ActualHeight * scale);
+            int width = windowRect.Right - windowRect.Left;
+            int height = windowRect.Bottom - windowRect.Top;
             if (width <= 0 || height <= 0)
             {
                 return;
@@ -353,14 +361,15 @@ namespace PeripheralBattery
             clientPoint.Y = y;
             NativeMethods.ScreenToClient(_taskbar, ref clientPoint);
 
+            // SWP_NOSIZE：宽高由 SizeToContent 决定，这里只挪位置
             NativeMethods.SetWindowPos(
                 hwnd,
                 IntPtr.Zero,
                 clientPoint.X,
                 clientPoint.Y,
-                width,
-                height,
-                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+                0,
+                0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
         }
 
         private void SetHovered(bool hovered)

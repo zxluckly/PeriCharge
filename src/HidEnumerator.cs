@@ -128,6 +128,10 @@ namespace PeripheralBattery
             IntPtr hFile, byte[] buffer, uint numberOfBytesToRead, out uint numberOfBytesRead, IntPtr overlapped);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool WriteFile(
+            IntPtr hFile, byte[] buffer, uint numberOfBytesToWrite, out uint numberOfBytesWritten, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CancelIoEx(IntPtr hFile, IntPtr overlapped);
 
         /// <summary>
@@ -198,6 +202,109 @@ namespace PeripheralBattery
 
                 data = buffer;
                 return true;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        /// <summary>
+        /// 往设备写一帧输出报告，然后在超时内等一帧满足 <paramref name="match"/> 的输入报告。
+        /// 厂商自定义通道（UsagePage 0xFF00 以上）通常不会自己上报，只有被查询时才回一帧，
+        /// 所以必须写读配对；期间设备推来的其它帧（状态变化之类）直接跳过。
+        /// </summary>
+        internal static bool Exchange(
+            HidDeviceInfo device, byte[] request, Predicate<byte[]> match,
+            int timeoutMs, out byte[] reply, out string error)
+        {
+            reply = null;
+            error = null;
+            if (device == null || request == null || request.Length == 0)
+            {
+                error = "请求为空";
+                return false;
+            }
+
+            IntPtr handle = CreateFile(
+                device.DevicePath, 0xC0000000, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (handle == InvalidHandleValue)
+            {
+                error = "打开设备失败：" + Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            try
+            {
+                uint written;
+                if (!WriteFile(handle, request, (uint)request.Length, out written, IntPtr.Zero))
+                {
+                    error = "WriteFile 失败：" + Marshal.GetLastWin32Error();
+                    return false;
+                }
+
+                DateTime deadline = DateTime.Now.AddMilliseconds(timeoutMs);
+                int bufferSize = device.InputReportLength > 0 ? device.InputReportLength : 64;
+
+                while (true)
+                {
+                    int remain = (int)(deadline - DateTime.Now).TotalMilliseconds;
+                    if (remain <= 0)
+                    {
+                        error = "等待应答超时";
+                        return false;
+                    }
+
+                    byte[] buffer = new byte[bufferSize];
+                    int bytesRead = 0;
+                    string readError = null;
+
+                    System.Threading.Tasks.Task readTask = System.Threading.Tasks.Task.Run(delegate
+                    {
+                        uint count;
+                        if (ReadFile(handle, buffer, (uint)buffer.Length, out count, IntPtr.Zero))
+                        {
+                            bytesRead = (int)count;
+                        }
+                        else
+                        {
+                            readError = "ReadFile 失败：" + Marshal.GetLastWin32Error();
+                        }
+                    });
+
+                    if (!readTask.Wait(remain))
+                    {
+                        CancelIoEx(handle, IntPtr.Zero);
+                        readTask.Wait(500);
+                        error = "等待应答超时";
+                        return false;
+                    }
+
+                    if (readError != null)
+                    {
+                        error = readError;
+                        return false;
+                    }
+
+                    if (bytesRead <= 0)
+                    {
+                        continue;
+                    }
+
+                    byte[] frame = buffer;
+                    if (bytesRead < buffer.Length)
+                    {
+                        frame = new byte[bytesRead];
+                        Array.Copy(buffer, frame, bytesRead);
+                    }
+
+                    if (match == null || match(frame))
+                    {
+                        reply = frame;
+                        return true;
+                    }
+                }
             }
             finally
             {

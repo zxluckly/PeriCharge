@@ -5,7 +5,7 @@ namespace PeripheralBattery
 {
     /// <summary>
     /// 从 HID 输入报告读取经典蓝牙外设电量。
-    /// 目前支持 DualSense（VID_054C / PID_0CE6）。
+    /// 目前支持 DualSense（VID_054C / PID_0CE6）和墨将（BIGBIG WON）2.4G 接收器。
     /// </summary>
     internal static class HidBatteryService
     {
@@ -20,6 +20,25 @@ namespace PeripheralBattery
         private static volatile bool s_dirty = true;
 
         private const int CacheMaxAgeSeconds = 180;
+
+        /// <summary>墨将（BIGBIG WON）2.4G 接收器：伪装成 Xbox 360 无线手柄。</summary>
+        private const int BigBigWonVendorId = 0x413D;
+        private const int BigBigWonProductId = 0x2104;
+
+        /// <summary>
+        /// 厂商自定义通道（接收器的 mi_02 接口）用途页，输入/输出报告都是 65 字节、report ID 0。
+        /// 手柄本体那路（UsagePage 0x0001 / Usage 0x0005，15 字节）只有摇杆按键，没有电量。
+        /// </summary>
+        private const ushort BigBigWonUsagePage = 0xFF7A;
+
+        /// <summary>
+        /// 查询失败时提示一次「关掉墨将助手再试」。助手会占着同一个厂商通道，
+        /// 它开着的时候我们发出去的查询收不到应答，提示只记一次，避免每轮刷屏。
+        /// </summary>
+        private static bool s_bigBigWonHintLogged;
+
+        /// <summary>上次读到的墨将电量，只在变化时写日志。</summary>
+        private static int s_lastBigBigWonPercent = -1;
 
         /// <summary>设备列表可能已变化（插拔、休眠唤醒），下一轮重新枚举。</summary>
         internal static void Invalidate()
@@ -140,6 +159,27 @@ namespace PeripheralBattery
                 }
             }
 
+            // 墨将（BIGBIG WON）2.4G 接收器：手柄本体的报告里没有电量，
+            // 只能往厂商通道发查询帧，再读它回的那一帧
+            foreach (HidDeviceInfo device in devices)
+            {
+                if (device.VendorId != BigBigWonVendorId
+                    || device.ProductId != BigBigWonProductId
+                    || device.UsagePage != BigBigWonUsagePage
+                    || device.InputReportLength <= 0)
+                {
+                    continue;
+                }
+
+                attempts++;
+                DeviceBattery item = ReadBigBigWon(device);
+                if (item != null)
+                {
+                    succeeded++;
+                    result.Add(item);
+                }
+            }
+
             // 缓存里有设备却一个都读不到，多半是插拔后节点变了而通知没收到，
             // 下次重新枚举一次；能读到就不动，避免每轮都白枚举一遍
             if (attempts > 0 && succeeded == 0)
@@ -248,6 +288,104 @@ namespace PeripheralBattery
             item.Full = full;
             item.Error = abnormal ? "充电异常" : (headphone ? "耳机已连接" : null);
             return item;
+        }
+
+        /// <summary>
+        /// 墨将（BIGBIG WON）2.4G 接收器的厂商协议。
+        ///
+        /// 帧格式（从墨将助手的 DevMgr.dll 里反出来，再用实机验证过）：
+        ///   [A5][长度][命令][数据...][校验]
+        ///   长度 = 从 A5 数到校验前的字节数（即 3 + 数据长度）
+        ///   校验 = 从 A5 累加到最后一个数据字节，取低 8 位
+        /// 整帧再前面加一个 report ID（本接口是 0），写的时候必须凑满 65 字节，
+        /// 短写会被 HID 栈直接拒掉（WriteFile 返回 False 且 err=0）。
+        ///
+        /// 查询电量：发 A5 04 04 AD，回 A5 06 04 64 00 13
+        ///   → 命令 0x04，第一个数据字节 0x64 = 100%
+        /// 助手界面上的电量就是从这一帧的 data[0] 取的（WndMgr 收到 0x9036 消息后
+        /// 直接把这个字节塞进进度条，见 0x21312A 处的 movzx eax, byte ptr [edx+3]）。
+        /// </summary>
+        private static DeviceBattery ReadBigBigWon(HidDeviceInfo device)
+        {
+            int length = device.OutputReportLength > 0 ? device.OutputReportLength : 65;
+            byte[] request = new byte[length];
+            request[0] = 0x00;  // report ID
+            request[1] = 0xA5;  // 帧头
+            request[2] = 0x04;  // 长度：A5 + 长度 + 命令 + 校验
+            request[3] = 0x04;  // 命令：查询电量
+            request[4] = 0xAD;  // 校验：0xA5 + 0x04 + 0x04 取低 8 位
+
+            byte[] reply;
+            string error;
+            if (!HidEnumerator.Exchange(device, request, IsBigBigWonBatteryReply, 800, out reply, out error))
+            {
+                if (!s_bigBigWonHintLogged)
+                {
+                    s_bigBigWonHintLogged = true;
+                    Log.Write("墨将手柄读取失败：" + error
+                        + "（墨将助手开着时会占住这个厂商通道，关掉它再试）");
+                }
+
+                return null;
+            }
+
+            // 应答里 [0] 是 report ID，[1] 起才是协议内容，所以电量在 [4]
+            int percent = reply[4];
+            if (percent < 0 || percent > 100)
+            {
+                Log.Write("墨将手柄电量异常：" + percent);
+                return null;
+            }
+
+            s_bigBigWonHintLogged = false;
+
+            // 只在变化时记一条，便于核对（电量本身刷新很频繁，每轮都记会刷爆日志）
+            if (percent != s_lastBigBigWonPercent)
+            {
+                s_lastBigBigWonPercent = percent;
+                Log.Write("墨将手柄电量：" + percent + "%");
+            }
+
+            DeviceBattery item = new DeviceBattery();
+            item.Id = "hid:" + device.DevicePath;
+            // 名字要短：悬浮条里设备名的 MaxWidth 是 180，太长会被截成「墨将手柄（2.4G 接…」。
+            // 接收器的 VID/PID 是所有墨将型号共用的，型号（迅龙2 等）没法从这里区分，
+            // 所以只报品牌，不编造型号
+            item.Name = "墨将手柄";
+            item.Kind = DeviceKind.UsbReceiver;
+            item.Percent = percent;
+            item.Online = true;
+            item.Supported = true;
+            item.UpdatedAt = DateTime.Now;
+            return item;
+        }
+
+        /// <summary>
+        /// 是不是一条合法的电量应答：A5 帧头、命令 0x04、长度自洽、校验和吻合。
+        /// 只靠「读到一帧」判断不行——设备也会推别的帧（连接状态、按键、RGB 之类）。
+        /// </summary>
+        private static bool IsBigBigWonBatteryReply(byte[] frame)
+        {
+            // frame[0] 是 report ID，frame[1] 才是 A5
+            if (frame == null || frame.Length < 7 || frame[1] != 0xA5)
+            {
+                return false;
+            }
+
+            int frameLength = frame[2];
+            if (frameLength < 6 || frameLength + 1 > frame.Length || frame[3] != 0x04)
+            {
+                return false;
+            }
+
+            int sum = 0;
+            for (int i = 1; i < frameLength; i++)
+            {
+                sum += frame[i];
+            }
+
+            // 校验字节在 frame[frameLength]（因为前面多了 report ID 这一字节）
+            return (sum & 0xFF) == frame[frameLength];
         }
 
         /// <summary>
