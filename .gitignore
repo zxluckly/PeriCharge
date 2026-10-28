@@ -6,3 +6,6 @@ dist/
 .vs/
 *.log
 参考网页/
+
+# 旧版开发说明，仅保留在本地
+README.dev.md
