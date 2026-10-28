@@ -60,7 +60,7 @@ Usage Page `0xFF7A` 那个是厂商通道，其余三个是伪装成 Xbox 360 �
 
 ## 快速开始
 
-1. 到 [Releases](https://github.com/zxluckly/PeriCharge/releases) 下载 `PeriCharge-v0.2.0.zip`
+1. 到 [Releases](https://github.com/zxluckly/PeriCharge/releases) 下载 `PeriCharge-v0.3.0.zip`
 2. 解压，双击 `PeripheralBattery.exe` —— 没有主窗口，直接进托盘
 3. 想开机自启：右键托盘图标 → 勾选「开机自动启动」
 
