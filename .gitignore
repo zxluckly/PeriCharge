@@ -7,6 +7,7 @@ dist/
 *.log
 参考网页/
 
-# 旧版开发说明，仅保留在本地
+# 开发/交接文档只在本地保留，仓库里只有面向用户的 README
 README.dev.md
 docs/交接文档.md
+docs/仅图标电量填充-设计.md

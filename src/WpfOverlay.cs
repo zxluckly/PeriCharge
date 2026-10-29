@@ -706,15 +706,9 @@ namespace PeripheralBattery
 
             if (_compactStyle == CompactStyle.IconOnly)
             {
-                // 没有胶囊可读，就把电量体现在图标颜色上：
-                // 绿 / 琥珀 / 红扫一眼就知道，比逐个读数字快
-                TextBlock only = new TextBlock();
-                only.Text = UiTheme.GetIconGlyph(item.Name);
-                only.FontFamily = new FontFamily("Segoe MDL2 Assets");
-                only.FontSize = 14;
-                only.Foreground = new SolidColorBrush(online ? accent : ToMediaColor(UiTheme.TextDisabled));
-                only.VerticalAlignment = VerticalAlignment.Center;
-                return only;
+                // 没有胶囊可读，就把电量做成图标里的水位：底色 + 档位色从底部填上来，
+                // 绿 / 琥珀 / 红再加高度，扫一眼就知道谁快没电
+                return CompactIcon.Create(item, CompactIcon.GlyphSize);
             }
 
             StackPanel panel = new StackPanel();
