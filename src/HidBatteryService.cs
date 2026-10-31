@@ -249,18 +249,22 @@ namespace PeripheralBattery
             int capacity = levelByte & 0x0F;
             int chargeState = (levelByte >> 4) & 0x0F;
 
-            // 注意：旧实现判断的是 connectByte 的 bit3，那是「USB 是否已连接」，不是充电状态
-            // （SDL 的 PS5StatePacket 把 53 号字节注释为 "0x08 = USB, 0x01 = headphone"）。
-            // 因为 DualSense 只能有线充电，「插着线」和「在充电」在正常场景高度重合，
-            // 所以旧逻辑看起来一直是对的；但插线已充满、插线供电不足、充电异常会判断错。
-            bool charging = chargeState == 0x1;
-            bool full = chargeState == 0x2;
+            // connectByte 的 bit3 是「USB 是否已连接」，bit0 是「耳机是否接入」，
+            // 都不能拿来当充电状态（SDL 的 PS5StatePacket 里这两个标志就是这么注释的）。
             bool abnormal = chargeState == 0xA || chargeState == 0xB || chargeState == 0xF;
             bool headphone = (connectByte & 0x01) != 0;
             bool usbConnected = (connectByte & 0x08) != 0;
 
-            // 充满时等级位可能为 0，按等级换算会得到 5%，需要直接给 100%
-            int percent = full ? 100 : Math.Min(capacity * 10 + 5, 100);
+            // 电量只认等级位。实测 DualSense 走 USB 时状态位恒为 0x2（协议里的「已充满」），
+            // 等级 8、9 档时也照报不误——之前凭 0x2 直接给 100%，插线就会从 85% 跳到 100%。
+            // 状态位 0x2 只有配合等级 10 才算真满。
+            bool full = chargeState == 0x2 && capacity >= 10;
+            int percent = Math.Min(capacity * 10 + 5, 100);
+
+            // 状态位 0x1 才是「充电中」，但 USB 模式下读不到它（恒为 0x2）。
+            // DualSense 只能有线充电，插着线又没满就当在充电，
+            // 否则插线时既没有 ⚡ 也没有 ✦，看起来像没识别到充电。
+            bool charging = chargeState == 0x1 || (usbConnected && !abnormal && capacity < 10);
 
             // 只在字节变化时记录，便于核对充电状态与 USB/耳机标志的实际取值
             if (levelByte != s_lastLevelByte || connectByte != s_lastConnectByte)
