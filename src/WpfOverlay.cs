@@ -366,12 +366,33 @@ namespace PeripheralBattery
             if (NativeMethods.GetParent(hwnd) != taskbar)
             {
                 NativeMethods.SetParent(hwnd, taskbar);
-                int style = NativeMethods.GetWindowLong(hwnd, -16);
-                style = (style & ~unchecked((int)0x80000000)) | 0x40000000;
-                NativeMethods.SetWindowLong(hwnd, -16, style);
             }
 
+            ApplyOverlayWindowStyles(hwnd);
             UpdatePosition();
+        }
+
+        /// <summary>
+        /// 悬浮条是任务栏的子窗口，但 WPF 在 SetParent 之后会重算窗口样式，
+        /// 把 WS_EX_TOOLWINDOW / WS_EX_NOACTIVATE 一起抹掉——实测 exStyle 只剩 LAYERED。
+        /// 少了 TOOLWINDOW，Win11 的任务视图会把它当成一个普通应用窗口，
+        /// 显示成一张只有电池图标的全黑卡片。每次定位前都校正一遍。
+        /// </summary>
+        private static void ApplyOverlayWindowStyles(IntPtr hwnd)
+        {
+            int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
+            int childStyle = (style & ~unchecked((int)0x80000000)) | 0x40000000;
+            if (childStyle != style)
+            {
+                NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, childStyle);
+            }
+
+            int exStyle = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+            int wantEx = exStyle | NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE;
+            if (wantEx != exStyle)
+            {
+                NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE, wantEx);
+            }
         }
 
         private void UpdatePosition()
@@ -392,10 +413,9 @@ namespace PeripheralBattery
             if (NativeMethods.GetParent(hwnd) != _taskbar)
             {
                 NativeMethods.SetParent(hwnd, _taskbar);
-                int style = NativeMethods.GetWindowLong(hwnd, -16);
-                style = (style & ~unchecked((int)0x80000000)) | 0x40000000;
-                NativeMethods.SetWindowLong(hwnd, -16, style);
             }
+
+            ApplyOverlayWindowStyles(hwnd);
 
             NativeMethods.RECT trayRect;
             if (!NativeMethods.GetWindowRect(_taskbar, out trayRect))
