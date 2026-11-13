@@ -251,20 +251,28 @@ namespace PeripheralBattery
 
             // connectByte 的 bit3 是「USB 是否已连接」，bit0 是「耳机是否接入」，
             // 都不能拿来当充电状态（SDL 的 PS5StatePacket 里这两个标志就是这么注释的）。
-            bool abnormal = chargeState == 0xA || chargeState == 0xB || chargeState == 0xF;
-            bool headphone = (connectByte & 0x01) != 0;
-            bool usbConnected = (connectByte & 0x08) != 0;
+            //
+            // 但这套位定义只在 64 字节的 USB 报告里成立。蓝牙报告（78 字节）同一位置
+            // 是别的标志：实测未插线时 b[55] 报过 0x18（bit3、bit4 都被置位），
+            // 照读就会把「蓝牙连接」当成「插着 USB 在充电」，UI 上凭空多出 ⚡。
+            bool isUsbReport = report.Length < 78;
+            bool abnormal = isUsbReport
+                && (chargeState == 0xA || chargeState == 0xB || chargeState == 0xF);
+            bool headphone = isUsbReport && (connectByte & 0x01) != 0;
+            bool usbConnected = isUsbReport && (connectByte & 0x08) != 0;
 
             // 电量只认等级位。实测 DualSense 走 USB 时状态位恒为 0x2（协议里的「已充满」），
             // 等级 8、9 档时也照报不误——之前凭 0x2 直接给 100%，插线就会从 85% 跳到 100%。
-            // 状态位 0x2 只有配合等级 10 才算真满。
-            bool full = chargeState == 0x2 && capacity >= 10;
+            // 状态位 0x2 只有配合等级 10 才算真满。蓝牙报告的状态位同样不可信
+            // （未插线也能报 0x2），所以整套状态位只在 USB 报告里采信。
+            bool full = isUsbReport && chargeState == 0x2 && capacity >= 10;
             int percent = Math.Min(capacity * 10 + 5, 100);
 
             // 状态位 0x1 才是「充电中」，但 USB 模式下读不到它（恒为 0x2）。
             // DualSense 只能有线充电，插着线又没满就当在充电，
             // 否则插线时既没有 ⚡ 也没有 ✦，看起来像没识别到充电。
-            bool charging = chargeState == 0x1 || (usbConnected && !abnormal && capacity < 10);
+            bool charging = isUsbReport
+                && (chargeState == 0x1 || (usbConnected && !abnormal && capacity < 10));
 
             // 只在字节变化时记录，便于核对充电状态与 USB/耳机标志的实际取值
             if (levelByte != s_lastLevelByte || connectByte != s_lastConnectByte)
@@ -273,9 +281,10 @@ namespace PeripheralBattery
                 s_lastConnectByte = (byte)connectByte;
                 Log.Write(string.Format(
                     "DualSense 电量字节变化：id=0x{0:X2} len={1} b[{2}]=0x{3:X2} b[{4}]=0x{5:X2}"
-                    + " → 等级{6} 状态0x{7:X} 充电={8} 满={9} USB={10} 耳机={11}",
+                    + " → 等级{6} 状态0x{7:X} 充电={8} 满={9} USB={10} 耳机={11} 总线={12}",
                     reportId, report.Length, levelIndex, levelByte, levelIndex + 1, connectByte,
-                    capacity, chargeState, charging, full, usbConnected, headphone));
+                    capacity, chargeState, charging, full, usbConnected, headphone,
+                    isUsbReport ? "USB" : "蓝牙"));
             }
 
             DeviceBattery item = new DeviceBattery();
