@@ -26,6 +26,11 @@ namespace PeripheralBattery
         private bool _exiting;
         private string _lastHidSignature = string.Empty;
 
+        // 菜单是复用的，字体只建一次。每次右键都 new Font 又不 Dispose，
+        // 常驻进程的 GDI 句柄会随右键次数一直涨
+        private static readonly Font MenuFont = new Font("Segoe UI", 9f);
+        private static readonly Font MenuTitleFont = new Font("Segoe UI", 9.5f, System.Drawing.FontStyle.Bold);
+
         internal AppController(System.Windows.Application app)
         {
             _app = app;
@@ -267,7 +272,7 @@ namespace PeripheralBattery
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
             menu.Renderer = new DarkMenuRenderer();
-            menu.Font = new Font("Segoe UI", 9f);
+            menu.Font = MenuFont;
             menu.ShowImageMargin = false;
             menu.ShowCheckMargin = true;
             menu.DropShadowEnabled = false;
@@ -307,15 +312,23 @@ namespace PeripheralBattery
             menu.Renderer = new DarkMenuRenderer();
             menu.BackColor = UiTheme.MenuBackground;
             menu.ForeColor = UiTheme.TextPrimary;
-            menu.Font = new Font("Segoe UI", 9f);
+            menu.Font = MenuFont;
             menu.ShowCheckMargin = true;
             menu.ShowImageMargin = false;
             menu.Padding = new Forms.Padding(4);
-            menu.Items.Clear();
+
+            // Items.Clear() 只是从集合里摘掉，ToolStripItem 自带的 GDI 资源不跟着释放，
+            // 右键几百次之后句柄会慢慢涨。逐个 Dispose。
+            while (menu.Items.Count > 0)
+            {
+                Forms.ToolStripItem old = menu.Items[0];
+                menu.Items.RemoveAt(0);
+                old.Dispose();
+            }
 
             Forms.ToolStripMenuItem title = new Forms.ToolStripMenuItem("外设电量");
             title.Enabled = false;
-            title.Font = new Font("Segoe UI", 9.5f, System.Drawing.FontStyle.Bold);
+            title.Font = MenuTitleFont;
             title.ForeColor = UiTheme.TextSecondary;
             menu.Items.Add(title);
 

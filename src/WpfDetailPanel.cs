@@ -133,6 +133,9 @@ namespace PeripheralBattery
                 Show();
             }
 
+            // WPF 在 Show 之后可能重算窗口样式（悬浮条 SetParent 后就被抹过一次
+            // TOOLWINDOW），所以每次显示都校正一遍，不能只在创建时设一次
+            ApplyPanelWindowStyles();
             PositionAboveAnchor();
         }
 
@@ -179,16 +182,26 @@ namespace PeripheralBattery
         protected override void OnSourceInitialized(EventArgs e)
         {
             base.OnSourceInitialized(e);
+            ApplyPanelWindowStyles();
+        }
 
+        /// <summary>
+        /// 不抢焦点、不进 Alt+Tab 和任务视图：它只是悬浮条的一个附属浮层。
+        /// 少一个 WS_EX_TOOLWINDOW，任务视图里就会多出一张全黑卡片。
+        /// </summary>
+        private void ApplyPanelWindowStyles()
+        {
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            if (hwnd != IntPtr.Zero)
+            if (hwnd == IntPtr.Zero)
             {
-                // 不抢焦点、不进 Alt+Tab：它只是悬浮条的一个附属浮层
-                int exStyle = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
-                NativeMethods.SetWindowLong(
-                    hwnd,
-                    NativeMethods.GWL_EXSTYLE,
-                    exStyle | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW);
+                return;
+            }
+
+            int exStyle = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+            int want = exStyle | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW;
+            if (want != exStyle)
+            {
+                NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE, want);
             }
         }
 

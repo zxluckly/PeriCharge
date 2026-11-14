@@ -201,6 +201,7 @@ namespace PeripheralBattery
 
         private static byte s_lastLevelByte = 0xFF;
         private static byte s_lastConnectByte = 0xFF;
+        private static int s_lastReportLength = -1;
 
         private static DeviceBattery ReadDualSense(HidDeviceInfo device)
         {
@@ -233,8 +234,10 @@ namespace PeripheralBattery
             }
 
             // 连接/断开瞬间会收到报告体为空壳的报告（第 10 字节起全 0），
-            // 那种帧读到的电量字节是填充的 0，会显示成 5%
-            if (levelIndex == 53 && IsEmptyBody(report))
+            // 那种帧读到的电量字节是填充的 0，会显示成 5%。
+            // USB（64 字节）和蓝牙（78 字节）都会出现，两种长度都要挡——
+            // 只挡 USB 的话，蓝牙连接瞬间会闪一下 5%。
+            if (IsEmptyBody(report))
             {
                 Log.Write("DualSense 收到空壳报告，已忽略：len=" + report.Length);
                 return null;
@@ -274,9 +277,14 @@ namespace PeripheralBattery
             bool charging = isUsbReport
                 && (chargeState == 0x1 || (usbConnected && !abnormal && capacity < 10));
 
-            // 只在字节变化时记录，便于核对充电状态与 USB/耳机标志的实际取值
-            if (levelByte != s_lastLevelByte || connectByte != s_lastConnectByte)
+            // 只在字节变化时记录，便于核对充电状态与 USB/耳机标志的实际取值。
+            // 报告长度也要参与比较：USB 和蓝牙共用同一对静态变量，切换总线时
+            // 只要字节碰巧相同（比如都是 0x28/0x18）就会漏记，排查时看不到切换点。
+            if (report.Length != s_lastReportLength
+                || levelByte != s_lastLevelByte
+                || connectByte != s_lastConnectByte)
             {
+                s_lastReportLength = report.Length;
                 s_lastLevelByte = (byte)levelByte;
                 s_lastConnectByte = (byte)connectByte;
                 Log.Write(string.Format(

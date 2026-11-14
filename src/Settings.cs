@@ -98,7 +98,8 @@ namespace PeripheralBattery
                         int seconds;
                         if (int.TryParse(value, out seconds) && seconds >= 10)
                         {
-                            settings.RefreshSeconds = seconds;
+                            // 手改 ini 写成 999999 会变成十几天才刷新一次，加个上限
+                            settings.RefreshSeconds = Math.Min(3600, seconds);
                         }
                     }
                     else if (key == "hiddenIds")
@@ -189,7 +190,27 @@ namespace PeripheralBattery
                     "compactThreshold=" + CompactThreshold,
                     "compactStyle=" + (int)CompactStyle
                 };
-                File.WriteAllLines(FilePath, lines);
+
+                // 先写临时文件再整体替换：直接覆盖写时如果断电或进程被杀，
+                // 会留下半截文件，下次启动只剩前面几个键，用户的设置等于被重置
+                string temp = FilePath + ".tmp";
+                File.WriteAllLines(temp, lines);
+
+                if (File.Exists(FilePath))
+                {
+                    try
+                    {
+                        File.Replace(temp, FilePath, null);
+                        return;
+                    }
+                    catch
+                    {
+                        // 某些文件系统不支持 Replace，退回到「删掉再改名」
+                    }
+                }
+
+                File.Delete(FilePath);
+                File.Move(temp, FilePath);
             }
             catch
             {
