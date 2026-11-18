@@ -51,6 +51,9 @@ namespace PeripheralBattery
         /// <summary>每台显示器一个写入防抖定时器：滚轮连滚时不至于每一格都发一次 DDC。</summary>
         private readonly Dictionary<string, DispatcherTimer> _brightnessTimers = new Dictionary<string, DispatcherTimer>();
 
+        /// <summary>待写入的目标值（Id → 百分比）。定时器只认这个，不持有显示器对象。</summary>
+        private readonly Dictionary<string, int> _pendingBrightness = new Dictionary<string, int>();
+
         /// <summary>无视设备数量，一直用紧凑样式。</summary>
         private bool _forceCompact;
 
@@ -1011,9 +1014,16 @@ namespace PeripheralBattery
 
         private void ScheduleBrightnessWrite(MonitorBrightness monitor)
         {
+            // 目标值按 Id 记下来：定时器只建一次，闭包里绝不能捕获 monitor 对象本身。
+            // 每 30 秒重新扫描会把悬浮条换成新的 MonitorBrightness 实例，
+            // 捕获旧对象的定时器会一直写那个「冻结」的百分比——
+            // 表现就是界面在变、屏幕纹丝不动
+            _pendingBrightness[monitor.Id] = monitor.Percent;
+
             DispatcherTimer timer;
             if (!_brightnessTimers.TryGetValue(monitor.Id, out timer))
             {
+                string id = monitor.Id;
                 timer = new DispatcherTimer();
                 timer.Interval = TimeSpan.FromMilliseconds(180);
                 timer.Tick += delegate
@@ -1022,7 +1032,7 @@ namespace PeripheralBattery
 
                     // 滚轮停了才同步面板，连滚过程中不重建
                     _panel.UpdateBrightness(_monitors);
-                    WriteBrightness(monitor);
+                    WriteBrightness(id);
                 };
                 _brightnessTimers[monitor.Id] = timer;
             }
@@ -1031,21 +1041,98 @@ namespace PeripheralBattery
             timer.Start();
         }
 
-        private void WriteBrightness(MonitorBrightness monitor)
+        /// <summary>按 Id 找当前那台显示器，用待写入的目标值落盘。</summary>
+        private void WriteBrightness(string id)
         {
-            if (_destroyed || monitor == null)
+            if (_destroyed)
             {
                 return;
             }
 
-            MonitorBrightness snapshot = monitor.Clone();
+            int target;
+            if (!_pendingBrightness.TryGetValue(id, out target))
+            {
+                return;
+            }
+
+            MonitorBrightness current = null;
+            for (int i = 0; i < _monitors.Length; i++)
+            {
+                if (_monitors[i].Id == id)
+                {
+                    current = _monitors[i];
+                    break;
+                }
+            }
+
+            if (current == null)
+            {
+                return;
+            }
+
+            MonitorBrightness snapshot = current.Clone();
+            snapshot.Percent = target;
             Task.Run(delegate
             {
-                if (!BrightnessService.Set(snapshot, snapshot.Percent))
+                bool ok = BrightnessService.Set(snapshot, target);
+                if (ok)
                 {
-                    Log.Write("设置亮度失败：" + snapshot.Name + " → " + snapshot.Percent + "%");
+                    return;
+                }
+
+                Log.Write("设置亮度失败：" + snapshot.Name + " → " + target + "%");
+
+                // 写不进去就把界面改回硬件真实值：数字变了、屏幕没变比直接失败更坑
+                List<MonitorBrightness> actual = BrightnessService.Scan();
+                for (int i = 0; i < actual.Count; i++)
+                {
+                    if (actual[i].Id != snapshot.Id || !actual[i].Controllable)
+                    {
+                        continue;
+                    }
+
+                    int value = actual[i].Percent;
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                    {
+                        ApplyBrightnessValue(snapshot.Id, value);
+                    }));
+                    break;
                 }
             });
+        }
+
+        /// <summary>把某一项亮度改回指定值（写入失败后回滚界面用）。</summary>
+        private void ApplyBrightnessValue(string id, int percent)
+        {
+            if (_destroyed)
+            {
+                return;
+            }
+
+            for (int i = 0; i < _monitors.Length; i++)
+            {
+                if (_monitors[i].Id == id)
+                {
+                    _monitors[i].Percent = percent;
+                }
+            }
+
+            Border slot;
+            if (_compact && _compactStyle == CompactStyle.IconOnly
+                && _brightnessSlots.TryGetValue(id, out slot))
+            {
+                slot.Child = CompactIcon.Create(BrightnessGlyph, percent, CompactIcon.GlyphSize);
+            }
+            else
+            {
+                TextBlock label;
+                if (_brightnessLabels.TryGetValue(id, out label))
+                {
+                    label.Text = percent + "%";
+                }
+            }
+
+            _panel.UpdateBrightness(_monitors);
         }
 
         /// <summary>显示器列表变了（插拔、重新扫描）时整条重画。</summary>

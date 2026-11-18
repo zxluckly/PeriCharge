@@ -151,11 +151,46 @@ namespace PeripheralBattery
 
         // ---- 对外接口 ----
 
+        /// <summary>DDC 通道独占，扫描与写入必须排队。</summary>
+        private static readonly object DdcLock = new object();
+
+        /// <summary>每块屏最后一次读成功的亮度，用来扛住偶发的读取失败。</summary>
+        private static readonly Dictionary<string, LastReading> s_lastDdc =
+            new Dictionary<string, LastReading>();
+
+        private sealed class LastReading
+        {
+            internal readonly int Percent;
+            private readonly DateTime _at;
+
+            internal LastReading(int percent)
+            {
+                Percent = percent;
+                _at = DateTime.Now;
+            }
+
+            internal bool Fresh
+            {
+                get { return (DateTime.Now - _at).TotalSeconds < 300; }
+            }
+        }
+
         /// <summary>
         /// 枚举当前所有显示器并读一次亮度。耗时约每屏几十毫秒，必须在后台线程调用。
         /// 读不到亮度的屏也会返回（Controllable=false），由上层决定显不显示。
         /// </summary>
         internal static List<MonitorBrightness> Scan()
+        {
+            // DDC 通道是独占的：扫描和写入同时跑会把通道搞卡——写入被显示器吞掉、
+            // 之后回读全失败，表现就是「界面在变、屏幕不动」。这里串行化，
+            // 宁可让扫描多等几十毫秒
+            lock (DdcLock)
+            {
+                return ScanCore();
+            }
+        }
+
+        private static List<MonitorBrightness> ScanCore()
         {
             List<MonitorBrightness> result = new List<MonitorBrightness>();
             List<IntPtr> handles = new List<IntPtr>();
@@ -234,12 +269,24 @@ namespace PeripheralBattery
                         {
                             monitor.Controllable = true;
                             monitor.Percent = ToPercent(current, min, max);
+                            s_lastDdc[monitor.Id] = new LastReading(monitor.Percent);
 
                             string description = physicals[i].szPhysicalMonitorDescription;
                             if (!string.IsNullOrEmpty(description)
                                 && description.IndexOf("Generic", StringComparison.OrdinalIgnoreCase) < 0)
                             {
                                 monitor.Name = description;
+                            }
+                        }
+                        else
+                        {
+                            // 单次读取失败（显示器刚唤醒、DDC 通道一时忙）不该让这一项
+                            // 从任务栏上闪没，5 分钟内沿用上次读数
+                            LastReading cached;
+                            if (s_lastDdc.TryGetValue(monitor.Id, out cached) && cached.Fresh)
+                            {
+                                monitor.Controllable = true;
+                                monitor.Percent = cached.Percent;
                             }
                         }
 
@@ -417,6 +464,14 @@ namespace PeripheralBattery
 
         private static bool SetOnce(string deviceName, int physicalIndex, int percent)
         {
+            lock (DdcLock)
+            {
+                return SetOnceCore(deviceName, physicalIndex, percent);
+            }
+        }
+
+        private static bool SetOnceCore(string deviceName, int physicalIndex, int percent)
+        {
             List<IntPtr> handles = new List<IntPtr>();
             MonitorEnumProc callback = delegate(IntPtr hMonitor, IntPtr hdc, ref RECT rect, IntPtr data)
             {
@@ -488,16 +543,26 @@ namespace PeripheralBattery
                         return false;
                     }
 
-                    // 回读校验：固件偶尔会吞掉一帧，读回来对不上就让外层重试
+                    // DDC 是异步的：写完立刻回读经常读到旧值甚至直接失败，
+                    // 给显示器一点时间把这一帧处理完
+                    System.Threading.Thread.Sleep(120);
+
+                    // 回读校验：读不回来就当作没写进去，交给外层换新句柄重试。
+                    // 以前这里读不到就直接 return true，结果是「界面改了、屏幕没动」
                     uint checkMin, checkCurrent, checkMax;
-                    if (GetMonitorBrightness(target, out checkMin, out checkCurrent, out checkMax)
-                        && checkMax > checkMin)
+                    for (int check = 0; check < 2; check++)
                     {
-                        int actual = ToPercent(checkCurrent, checkMin, checkMax);
-                        return Math.Abs(actual - percent) <= 2;
+                        if (GetMonitorBrightness(target, out checkMin, out checkCurrent, out checkMax)
+                            && checkMax > checkMin)
+                        {
+                            int actual = ToPercent(checkCurrent, checkMin, checkMax);
+                            return Math.Abs(actual - percent) <= 2;
+                        }
+
+                        System.Threading.Thread.Sleep(80);
                     }
 
-                    return true;
+                    return false;
                 }
                 finally
                 {
