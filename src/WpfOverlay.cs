@@ -29,6 +29,7 @@ namespace PeripheralBattery
         private readonly SolidColorBrush _borderBrush;
         private readonly uint _taskbarCreatedMessage;
         private readonly DispatcherTimer _hoverTimer;
+        private readonly DispatcherTimer _hookTimer;
         private readonly WpfDetailPanel _panel;
 
         private DeviceBattery[] _items = new DeviceBattery[0];
@@ -202,6 +203,13 @@ namespace PeripheralBattery
             _hoverTimer.Interval = TimeSpan.FromMilliseconds(120);
             _hoverTimer.Tick += OnHoverTimerTick;
 
+            // 低级钩子被系统摘掉后查不出来，靠这个定时器定期重装自愈。
+            // 5 秒一次：重装只是两个 API 调用，开销可以忽略；
+            // 间隔再长的话，用户滚轮失效后要等很久才恢复
+            _hookTimer = new DispatcherTimer();
+            _hookTimer.Interval = TimeSpan.FromSeconds(5);
+            _hookTimer.Tick += delegate { RefreshMouseHook(); };
+
             _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
             ApplyTheme();
         }
@@ -216,6 +224,7 @@ namespace PeripheralBattery
             }
 
             InstallMouseHook();
+            _hookTimer.Start();
             AttachToTaskbar();
         }
 
@@ -237,6 +246,7 @@ namespace PeripheralBattery
             _brightnessTimers.Clear();
 
             UninstallMouseHook();
+            _hookTimer.Stop();
 
             if (!_panel.IsDestroyed)
             {
@@ -880,6 +890,16 @@ namespace PeripheralBattery
             _mouseHookProc = null;
         }
 
+        /// <summary>
+        /// 重装钩子。系统摘掉低级钩子后不会通知、也查不到状态，
+        /// 只能靠定期重装自愈（跟着 30 秒一轮的亮度扫描走）。
+        /// </summary>
+        private void RefreshMouseHook()
+        {
+            UninstallMouseHook();
+            InstallMouseHook();
+        }
+
         private IntPtr OnLowLevelMouse(int nCode, IntPtr wParam, IntPtr lParam)
         {
             try
@@ -888,17 +908,7 @@ namespace PeripheralBattery
                     && wParam == new IntPtr(NativeMethods.WM_MOUSEWHEEL)
                     && !_destroyed)
                 {
-                    // 两套命中判断互为兜底：优先用 WPF 自己的鼠标跟踪结果，
-                    // 拿不到再按屏幕坐标做一次命中测试（任务栏子窗口的坐标换算偶尔对不上）
                     MonitorBrightness monitor = HitTestBrightness();
-                    if (monitor == null)
-                    {
-                        NativeMethods.MSLLHOOKSTRUCT point =
-                            (NativeMethods.MSLLHOOKSTRUCT)Marshal.PtrToStructure(
-                                lParam, typeof(NativeMethods.MSLLHOOKSTRUCT));
-                        monitor = HitTestBrightnessAt(point.pt.X, point.pt.Y);
-                    }
-
                     if (monitor != null)
                     {
                         NativeMethods.MSLLHOOKSTRUCT data =
@@ -907,7 +917,18 @@ namespace PeripheralBattery
 
                         // mouseData 的高 16 位是带符号的滚轮增量
                         int delta = (short)((data.mouseData >> 16) & 0xFFFF);
-                        AdjustBrightness(monitor, delta > 0 ? 1 : -1);
+                        int direction = delta > 0 ? 1 : -1;
+
+                        // 回调里绝不能做重活：低级钩子整条链路有 300ms 超时
+                        // （LowLevelHooksTimeout），超时后系统会**静默摘掉钩子**，
+                        // 之后滚轮彻底没反应，只能重启程序。
+                        // Twinkle Tray 这类同样装了钩子的程序一旦卡住链路，
+                        // 我们就会被连坐。所以这里只判断命中，调整动作丢进 UI 队列。
+                        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate
+                        {
+                            AdjustBrightness(monitor, direction);
+                        }));
+
                         return new IntPtr(1);   // 吞掉，别让下面的窗口跟着滚
                     }
                 }
@@ -927,25 +948,6 @@ namespace PeripheralBattery
         }
 
         /// <summary>按屏幕坐标做一次命中测试（兜底路径）。</summary>
-        private MonitorBrightness HitTestBrightnessAt(int screenX, int screenY)
-        {
-            try
-            {
-                Point client = PointFromScreen(new Point(screenX, screenY));
-                if (client.X < 0 || client.Y < 0
-                    || client.X >= ActualWidth || client.Y >= ActualHeight)
-                {
-                    return null;
-                }
-
-                return FindBrightnessOwner(InputHitTest(client) as DependencyObject);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
         private static MonitorBrightness FindBrightnessOwner(DependencyObject hit)
         {
             while (hit != null)
@@ -1002,9 +1004,8 @@ namespace PeripheralBattery
                 }
             }
 
-            // 面板正显示时同步百分比，不然悬停看到的是旧值
-            _panel.UpdateBrightness(_monitors);
-
+            // 面板的百分比等防抖结束再更新：连滚时每次都重建面板会闪，
+            // 而且重建比改一个文字块贵得多
             ScheduleBrightnessWrite(monitor);
         }
 
@@ -1018,6 +1019,9 @@ namespace PeripheralBattery
                 timer.Tick += delegate
                 {
                     timer.Stop();
+
+                    // 滚轮停了才同步面板，连滚过程中不重建
+                    _panel.UpdateBrightness(_monitors);
                     WriteBrightness(monitor);
                 };
                 _brightnessTimers[monitor.Id] = timer;
