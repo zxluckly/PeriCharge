@@ -7,15 +7,19 @@ Windows 10 / 11 下的轻量托盘工具：把外设电量和屏幕亮度直接�
 
 ![任务栏悬浮条](docs/images/taskbar-overlay-1.png)
 
-*任务栏悬浮条：DualSense 已充满（✦），R75Pro 剩余 86%。多台设备并排显示，不用切窗口。*
+*常规模式：设备名 + 电量胶囊 + 显示器亮度并排显示。鼠标悬停时背景浮起、右侧出现刷新按钮。*
 
-![未悬停](docs/images/taskbar-overlay-2.png)
+![紧凑模式](docs/images/taskbar-overlay-2.png)
 
-*未悬停：背景完全透明，只留设备图标、名称和电量胶囊，不遮挡任务栏本身。*
+*紧凑模式：去掉设备名，只留图标 + 胶囊。设备多了也不会把任务栏挤满。*
 
-![悬停](docs/images/taskbar-overlay-3.png)
+![仅图标](docs/images/taskbar-overlay-3.png)
 
-*鼠标悬停：背景浮起、边缘出现描边，右侧多出一个刷新按钮。移开即恢复透明。*
+*仅图标：电量做成图标里的水位，按百分比从底部填充、按档位换色。显示器亮度用同一套画法。*
+
+![悬停面板](docs/images/taskbar-overlay-4.png)
+
+*悬停详情：一次列全每台设备的电量和充电状态，以及每台显示器的亮度。*
 
 ## 功能
 

@@ -344,6 +344,10 @@ namespace PeripheralBattery
         // 写：WmiMonitorBrightnessMethods.WmiSetBrightness(Timeout, Brightness)
         // 写入比较慢（实测 0.3–1 秒），所以调用方都在后台线程里跑。
 
+        // 上次读到的内置屏亮度：WMI 偶尔读失败时沿用它，避免内置屏从任务栏上闪没
+        private static int s_lastWmiPercent = -1;
+        private static DateTime s_lastWmiAt = DateTime.MinValue;
+
         private static int ReadWmiBrightness()
         {
             try
@@ -356,7 +360,9 @@ namespace PeripheralBattery
                         object value = item["CurrentBrightness"];
                         if (value != null)
                         {
-                            return Convert.ToInt32(value);
+                            s_lastWmiPercent = Convert.ToInt32(value);
+                            s_lastWmiAt = DateTime.Now;
+                            return s_lastWmiPercent;
                         }
                     }
                 }
@@ -364,6 +370,13 @@ namespace PeripheralBattery
             catch
             {
                 // 台式机没有这个 WMI 类，属正常情况
+            }
+
+            // 偶尔一次读不到（WMI 忙、刚休眠唤醒）不该让内置屏从任务栏上闪没，
+            // 30 秒内沿用上一次的读数
+            if (s_lastWmiPercent >= 0 && (DateTime.Now - s_lastWmiAt).TotalSeconds < 30)
+            {
+                return s_lastWmiPercent;
             }
 
             return -1;
