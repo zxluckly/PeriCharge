@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -53,6 +54,9 @@ namespace PeripheralBattery
 
         /// <summary>待写入的目标值（Id → 百分比）。定时器只认这个，不持有显示器对象。</summary>
         private readonly Dictionary<string, int> _pendingBrightness = new Dictionary<string, int>();
+
+        /// <summary>上一次画出来的内容指纹，用来跳过无意义的重建。</summary>
+        private string _contentSignature;
 
         /// <summary>无视设备数量，一直用紧凑样式。</summary>
         private bool _forceCompact;
@@ -304,7 +308,9 @@ namespace PeripheralBattery
                 return;
             }
 
-            RebuildContent();
+            // 设置变了，指纹作废，强制重画一次
+            _contentSignature = null;
+            RefreshContentIfChanged();
 
             if (!_compact)
             {
@@ -351,7 +357,7 @@ namespace PeripheralBattery
                 return;
             }
 
-            RebuildContent();
+            RefreshContentIfChanged();
 
             // 面板开着的时候内容跟着刷新；设备掉到 3 台以内就不用面板了
             if (_panel.IsVisible)
@@ -380,6 +386,7 @@ namespace PeripheralBattery
             {
                 _emptyText = "正在扫描蓝牙设备…";
                 RebuildContent();
+                _contentSignature = BuildContentSignature();
                 Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
             }
         }
@@ -717,6 +724,49 @@ namespace PeripheralBattery
             _panel.SetStyle(_hoverColorArgb, _hoverAlpha);
         }
 
+        /// <summary>
+        /// 内容没变就不重建视觉树。每 30 秒刷新一次，重建一次要 new 十几个
+        /// TextBlock / Border / Geometry，白造垃圾；数据完全一致时直接跳过。
+        /// </summary>
+        private void RefreshContentIfChanged()
+        {
+            _compact = _forceCompact || _items.Length > _compactThreshold;
+
+            string next = BuildContentSignature();
+            if (next == _contentSignature)
+            {
+                return;
+            }
+
+            _contentSignature = next;
+            RebuildContent();
+        }
+
+        private string BuildContentSignature()
+        {
+            StringBuilder signature = new StringBuilder(96);
+            signature.Append(_compact ? 'C' : 'N').Append((int)_compactStyle).Append('|');
+            // 空列表时的提示文字也算内容：「正在扫描…」和「未发现设备」不能混为一谈
+            signature.Append(_emptyText).Append('|');
+
+            for (int i = 0; i < _items.Length; i++)
+            {
+                DeviceBattery item = _items[i];
+                signature.Append(item.Id).Append(':').Append(item.Percent)
+                    .Append(item.Online ? 'o' : '-')
+                    .Append(item.Charging ? 'c' : '-')
+                    .Append(item.Full ? 'f' : '-').Append(';');
+            }
+
+            signature.Append('|');
+            for (int i = 0; i < _monitors.Length; i++)
+            {
+                signature.Append(_monitors[i].Id).Append(':').Append(_monitors[i].Percent).Append(';');
+            }
+
+            return signature.ToString();
+        }
+
         private void RebuildContent()
         {
             _content.Children.Clear();
@@ -727,7 +777,6 @@ namespace PeripheralBattery
             // 任务栏右边根本放不下，压成「图标 + 胶囊」能收到一半以内，
             // 名字挪到悬停面板里看。阈值和是否强制都由设置决定
             _compact = _forceCompact || _items.Length > _compactThreshold;
-
             if (_items.Length == 0 && _monitors.Length == 0)
             {
                 TextBlock empty = new TextBlock();
@@ -1009,6 +1058,7 @@ namespace PeripheralBattery
 
             // 面板的百分比等防抖结束再更新：连滚时每次都重建面板会闪，
             // 而且重建比改一个文字块贵得多
+            _contentSignature = BuildContentSignature();
             ScheduleBrightnessWrite(monitor);
         }
 
@@ -1133,6 +1183,7 @@ namespace PeripheralBattery
             }
 
             _panel.UpdateBrightness(_monitors);
+            _contentSignature = BuildContentSignature();
         }
 
         /// <summary>显示器列表变了（插拔、重新扫描）时整条重画。</summary>
@@ -1144,7 +1195,7 @@ namespace PeripheralBattery
                 return;
             }
 
-            RebuildContent();
+            RefreshContentIfChanged();
             _panel.UpdateBrightness(_monitors);
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
         }

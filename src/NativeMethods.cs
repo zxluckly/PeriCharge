@@ -234,8 +234,7 @@ namespace PeripheralBattery
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern IntPtr SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
-        internal static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-        internal const uint SWP_NOSIZE = 0x0001;
+        internal static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);        internal const uint SWP_NOSIZE = 0x0001;
         internal const uint SWP_NOMOVE = 0x0002;
         internal const uint SWP_NOACTIVATE = 0x0010;
         internal const uint SWP_SHOWWINDOW = 0x0040;
@@ -269,5 +268,10 @@ namespace PeripheralBattery
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         internal static extern IntPtr GetModuleHandle(string moduleName);
+
+        /// <summary>传 -1,-1 就是让系统把工作集里冷掉的页换出去（等价 EmptyWorkingSet）。</summary>
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool SetProcessWorkingSetSize(
+            IntPtr process, IntPtr minimum, IntPtr maximum);
     }
 }

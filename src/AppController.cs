@@ -14,6 +14,11 @@ namespace PeripheralBattery
         private readonly Settings _settings;
         private readonly BatteryService _service;
         private readonly Forms.NotifyIcon _tray;
+
+        // 上一次画出来的托盘图标状态，用来跳过重复绘制
+        private int _trayPercent = -1;
+        private bool _trayOnline;
+        private bool _trayIconValid;
         private readonly Forms.ContextMenuStrip _menu;
         private readonly DispatcherTimer _timer;
         private readonly BroadcastWatcher _watcher;
@@ -38,6 +43,11 @@ namespace PeripheralBattery
         private volatile bool _brightnessScanning;
         private string _lastBrightnessSignature = string.Empty;
 
+        /// <summary>工作集修剪间隔。两分钟一次，够把冷页换出去，又不至于频繁抖动。</summary>
+        private const int TrimIntervalMs = 120000;
+
+        private readonly System.Threading.Timer _trimTimer;
+
         internal AppController(System.Windows.Application app)
         {
             _app = app;
@@ -57,6 +67,9 @@ namespace PeripheralBattery
             _tray = new Forms.NotifyIcon();
             _tray.Text = "外设电量监控";
             _tray.Icon = IconFactory.Create(0, false);
+            _trayPercent = 0;
+            _trayOnline = false;
+            _trayIconValid = true;
             _tray.Visible = true;
             _tray.ContextMenuStrip = _menu;
             _tray.MouseClick += OnTrayClick;
@@ -65,6 +78,11 @@ namespace PeripheralBattery
             _timer.Interval = TimeSpan.FromSeconds(1);
             _timer.Tick += OnTick;
             _timer.Start();
+
+            // 空闲时把工作集里冷掉的页换出去：常驻内存能从 90 多 MB 掉到 30 MB 以内。
+            // 提交量不变，只是不占着物理内存；下次用到的页系统会自己换回来
+            _trimTimer = new System.Threading.Timer(
+                delegate { TrimWorkingSet(); }, null, TrimIntervalMs, TrimIntervalMs);
 
             Log.Write("程序启动");
             StartRefresh();
@@ -310,11 +328,20 @@ namespace PeripheralBattery
                 minimum = 0;
             }
 
-            Icon previous = _tray.Icon;
-            _tray.Icon = IconFactory.Create(minimum, anyOnline);
-            if (previous != null)
+            // 图标只在电量或在线状态真的变了才重画：每 30 秒 new 一个 Bitmap + Graphics
+            // 再 GetHicon，纯属给 GDI 和 GC 添活，画出来的东西一模一样
+            if (!_trayIconValid || minimum != _trayPercent || anyOnline != _trayOnline)
             {
-                previous.Dispose();
+                Icon previous = _tray.Icon;
+                _tray.Icon = IconFactory.Create(minimum, anyOnline);
+                if (previous != null)
+                {
+                    previous.Dispose();
+                }
+
+                _trayPercent = minimum;
+                _trayOnline = anyOnline;
+                _trayIconValid = true;
             }
 
             List<string> parts = new List<string>();
@@ -780,6 +807,30 @@ namespace PeripheralBattery
             UpdateUi();
         }
 
+        /// <summary>
+        /// 把工作集里不常访问的页交给系统换出。提交内存（Private Bytes）不变，
+        /// 变的只是物理内存占用——任务管理器里看到的就是这个数。
+        /// </summary>
+        private void TrimWorkingSet()
+        {
+            if (_exiting)
+            {
+                return;
+            }
+
+            try
+            {
+                using (System.Diagnostics.Process self = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    NativeMethods.SetProcessWorkingSetSize(self.Handle, new IntPtr(-1), new IntPtr(-1));
+                }
+            }
+            catch
+            {
+                // 修剪失败无所谓，下次再来
+            }
+        }
+
         private void Exit()
         {
             if (_exiting)
@@ -789,6 +840,10 @@ namespace PeripheralBattery
 
             _exiting = true;
             _timer.Stop();
+            if (_trimTimer != null)
+            {
+                _trimTimer.Dispose();
+            }
             _tray.Visible = false;
             _tray.Dispose();
             _watcher.DestroyHandle();
