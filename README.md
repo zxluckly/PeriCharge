@@ -5,7 +5,7 @@ Windows 10 / 11 下的轻量托盘工具：把外设电量和屏幕亮度直接�
 
 ## 状态预览
 
-![任务栏悬浮条](docs/images/taskbar-overlay-1.png)
+![任务栏悬浮条](docs/images/taskbar-overlay.png)
 
 *常规模式：设备名 + 电量胶囊 + 显示器亮度并排显示。鼠标悬停时背景浮起、右侧出现刷新按钮。*
 
