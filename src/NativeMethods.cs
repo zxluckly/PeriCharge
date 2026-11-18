@@ -239,5 +239,35 @@ namespace PeripheralBattery
         internal const uint SWP_NOMOVE = 0x0002;
         internal const uint SWP_NOACTIVATE = 0x0010;
         internal const uint SWP_SHOWWINDOW = 0x0040;
+
+        // ---- 低级鼠标钩子：悬浮条是 NOACTIVATE 窗口，收不到常规的滚轮消息 ----
+
+        internal const int WH_MOUSE_LL = 14;
+        internal const int WM_MOUSEWHEEL = 0x020A;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        internal delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr SetWindowsHookEx(
+            int idHook, LowLevelMouseProc callback, IntPtr module, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        internal static extern IntPtr GetModuleHandle(string moduleName);
     }
 }

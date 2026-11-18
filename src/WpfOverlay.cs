@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -28,10 +32,23 @@ namespace PeripheralBattery
         private readonly WpfDetailPanel _panel;
 
         private DeviceBattery[] _items = new DeviceBattery[0];
+        private MonitorBrightness[] _monitors = new MonitorBrightness[0];
         private string _emptyText = "正在扫描蓝牙设备…";
         private bool _hovered;
         private bool _compact;
         private bool _enabled;
+
+        /// <summary>滚轮调亮度的步长。</summary>
+        private int _brightnessStep = Settings.DefaultBrightnessStep;
+
+        /// <summary>亮度项的文字块，滚轮调整时直接改文字，不重建整条。</summary>
+        private readonly Dictionary<string, TextBlock> _brightnessLabels = new Dictionary<string, TextBlock>();
+
+        /// <summary>仅图标模式下亮度项的容器，滚轮调整时换掉里面的水位图标。</summary>
+        private readonly Dictionary<string, Border> _brightnessSlots = new Dictionary<string, Border>();
+
+        /// <summary>每台显示器一个写入防抖定时器：滚轮连滚时不至于每一格都发一次 DDC。</summary>
+        private readonly Dictionary<string, DispatcherTimer> _brightnessTimers = new Dictionary<string, DispatcherTimer>();
 
         /// <summary>无视设备数量，一直用紧凑样式。</summary>
         private bool _forceCompact;
@@ -46,6 +63,10 @@ namespace PeripheralBattery
         private bool _destroyed;
         private IntPtr _taskbar;
         private HwndSource _source;
+
+        /// <summary>低级鼠标钩子，用来在 NOACTIVATE 窗口上收滚轮。</summary>
+        private IntPtr _mouseHook;
+        private NativeMethods.LowLevelMouseProc _mouseHookProc;
 
         internal event EventHandler RefreshRequested;
 
@@ -194,6 +215,7 @@ namespace PeripheralBattery
                 _source.AddHook(WndProc);
             }
 
+            InstallMouseHook();
             AttachToTaskbar();
         }
 
@@ -207,6 +229,15 @@ namespace PeripheralBattery
         {
             // 面板是独立顶层窗口，不跟着悬浮条一起销毁，得手动关掉
             _hoverTimer.Stop();
+
+            foreach (DispatcherTimer timer in _brightnessTimers.Values)
+            {
+                timer.Stop();
+            }
+            _brightnessTimers.Clear();
+
+            UninstallMouseHook();
+
             if (!_panel.IsDestroyed)
             {
                 _panel.Close();
@@ -676,13 +707,15 @@ namespace PeripheralBattery
         private void RebuildContent()
         {
             _content.Children.Clear();
+            _brightnessLabels.Clear();
+            _brightnessSlots.Clear();
 
             // 设备多了就把设备名去掉：四台按「图标 + 名字 + 胶囊」排下来要 800 多像素，
             // 任务栏右边根本放不下，压成「图标 + 胶囊」能收到一半以内，
             // 名字挪到悬停面板里看。阈值和是否强制都由设置决定
             _compact = _forceCompact || _items.Length > _compactThreshold;
 
-            if (_items.Length == 0)
+            if (_items.Length == 0 && _monitors.Length == 0)
             {
                 TextBlock empty = new TextBlock();
                 empty.Text = _emptyText;
@@ -694,25 +727,341 @@ namespace PeripheralBattery
                 return;
             }
 
+            List<UIElement> entries = new List<UIElement>();
+
             for (int i = 0; i < _items.Length; i++)
             {
-                bool last = i == _items.Length - 1;
-                _content.Children.Add(_compact
+                entries.Add(_compact
                     ? CreateCompactDeviceView(_items[i])
                     : CreateDeviceView(_items[i]));
+            }
 
-                if (!last)
+            // 亮度段接在设备段后面，顺序固定为主屏在前
+            for (int i = 0; i < _monitors.Length; i++)
+            {
+                entries.Add(CreateBrightnessView(_monitors[i]));
+            }
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                _content.Children.Add(entries[i]);
+
+                if (i < entries.Count - 1)
                 {
-                    System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse();
-                    dot.Width = 2;
-                    dot.Height = 2;
-                    dot.Margin = new Thickness(14, 0, 14, 0);
-                    dot.VerticalAlignment = VerticalAlignment.Center;
-                    dot.Fill = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
-                    dot.Opacity = 0.45;
-                    _content.Children.Add(dot);
+                    _content.Children.Add(CreateSeparatorDot());
                 }
             }
+        }
+
+        private UIElement CreateSeparatorDot()
+        {
+            System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse();
+            dot.Width = 2;
+            dot.Height = 2;
+            dot.Margin = new Thickness(14, 0, 14, 0);
+            dot.VerticalAlignment = VerticalAlignment.Center;
+            dot.Fill = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+            dot.Opacity = 0.45;
+            return dot;
+        }
+
+        /// <summary>
+        /// 显示器亮度：常规模式是「图标 + 名字 + 胶囊」，紧凑模式跟电量一样可以切成仅图标水位。
+        /// 整项都能接收滚轮——鼠标停在上面滚一格就是 ±一个步长。
+        /// </summary>
+        private UIElement CreateBrightnessView(MonitorBrightness monitor)
+        {
+            Border hit = new Border();
+            hit.Background = Brushes.Transparent;
+            hit.Tag = monitor;
+
+            // 仅图标模式：和电量一样用图标里的水位表示高低，颜色也复用同一套阈值
+            if (_compact && _compactStyle == CompactStyle.IconOnly)
+            {
+                hit.Child = CompactIcon.Create(BrightnessGlyph, monitor.Percent, CompactIcon.GlyphSize);
+                _brightnessSlots[monitor.Id] = hit;
+                return hit;
+            }
+
+            Color secondary = ToMediaColor(UiTheme.TextSecondary);
+
+            // 和电量用同一套阈值配色：低 → 红、中 → 黄、高 → 绿，
+            // 一眼就能看出哪块屏偏暗，视觉语言和电量段完全一致
+            Color accent = monitor.Percent < 0
+                ? secondary
+                : ToMediaColor(UiTheme.BatteryColor(monitor.Percent));
+
+            StackPanel panel = new StackPanel();
+            panel.Orientation = Orientation.Horizontal;
+            panel.VerticalAlignment = VerticalAlignment.Center;
+
+            TextBlock icon = new TextBlock();
+            icon.Text = BrightnessGlyph;
+            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            icon.FontSize = 13;
+            icon.Foreground = new SolidColorBrush(secondary);
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            panel.Children.Add(icon);
+
+            if (!_compact)
+            {
+                TextBlock name = new TextBlock();
+                name.Text = monitor.Name;
+                name.FontFamily = new FontFamily("Segoe UI");
+                name.FontSize = 13;
+                name.MaxWidth = 160;
+                name.TextTrimming = TextTrimming.CharacterEllipsis;
+                name.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextPrimary));
+                name.Margin = new Thickness(6, 0, 0, 0);
+                name.VerticalAlignment = VerticalAlignment.Center;
+                panel.Children.Add(name);
+            }
+
+            Border pill = new Border();
+            pill.CornerRadius = new CornerRadius(9);
+            pill.Padding = new Thickness(8, 1, 8, 1);
+            pill.VerticalAlignment = VerticalAlignment.Center;
+            pill.Background = new SolidColorBrush(Color.FromArgb(32, accent.R, accent.G, accent.B));
+            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(84, accent.R, accent.G, accent.B));
+            pill.BorderThickness = new Thickness(1);
+            pill.Margin = new Thickness(6, 0, 0, 0);
+
+            TextBlock value = new TextBlock();
+            value.Text = monitor.Percent < 0 ? "--%" : monitor.Percent + "%";
+            value.FontFamily = new FontFamily("Segoe UI");
+            value.FontSize = 12;
+            value.FontWeight = FontWeights.SemiBold;
+            value.Foreground = new SolidColorBrush(accent);
+            value.VerticalAlignment = VerticalAlignment.Center;
+            pill.Child = value;
+            panel.Children.Add(pill);
+
+            _brightnessLabels[monitor.Id] = value;
+            hit.Child = panel;
+            return hit;
+        }
+
+        /// <summary>Segoe MDL2 Assets 的 TVMonitor，电量和亮度两段共用同一枚显示器图标。</summary>
+        private const string BrightnessGlyph = "\uE7F4";
+
+        // ---- 滚轮：悬浮条是 WS_EX_NOACTIVATE 的窗口，常规 WM_MOUSEWHEEL 收不到
+        //      （系统默认只发给焦点窗口），所以挂一个低级鼠标钩子自己判断光标位置 ----
+
+        private void InstallMouseHook()
+        {
+            if (_mouseHook != IntPtr.Zero)
+            {
+                return;
+            }
+
+            // 委托必须由字段持有：一旦被 GC 回收，钩子回调就会指向已释放的内存
+            _mouseHookProc = OnLowLevelMouse;
+            _mouseHook = NativeMethods.SetWindowsHookEx(
+                NativeMethods.WH_MOUSE_LL,
+                _mouseHookProc,
+                NativeMethods.GetModuleHandle(null),
+                0);
+
+            if (_mouseHook == IntPtr.Zero)
+            {
+                Log.Write("安装滚轮钩子失败：" + Marshal.GetLastWin32Error());
+            }
+        }
+
+        private void UninstallMouseHook()
+        {
+            if (_mouseHook == IntPtr.Zero)
+            {
+                return;
+            }
+
+            NativeMethods.UnhookWindowsHookEx(_mouseHook);
+            _mouseHook = IntPtr.Zero;
+            _mouseHookProc = null;
+        }
+
+        private IntPtr OnLowLevelMouse(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (nCode >= 0
+                    && wParam == new IntPtr(NativeMethods.WM_MOUSEWHEEL)
+                    && !_destroyed)
+                {
+                    // 两套命中判断互为兜底：优先用 WPF 自己的鼠标跟踪结果，
+                    // 拿不到再按屏幕坐标做一次命中测试（任务栏子窗口的坐标换算偶尔对不上）
+                    MonitorBrightness monitor = HitTestBrightness();
+                    if (monitor == null)
+                    {
+                        NativeMethods.MSLLHOOKSTRUCT point =
+                            (NativeMethods.MSLLHOOKSTRUCT)Marshal.PtrToStructure(
+                                lParam, typeof(NativeMethods.MSLLHOOKSTRUCT));
+                        monitor = HitTestBrightnessAt(point.pt.X, point.pt.Y);
+                    }
+
+                    if (monitor != null)
+                    {
+                        NativeMethods.MSLLHOOKSTRUCT data =
+                            (NativeMethods.MSLLHOOKSTRUCT)Marshal.PtrToStructure(
+                                lParam, typeof(NativeMethods.MSLLHOOKSTRUCT));
+
+                        // mouseData 的高 16 位是带符号的滚轮增量
+                        int delta = (short)((data.mouseData >> 16) & 0xFFFF);
+                        AdjustBrightness(monitor, delta > 0 ? 1 : -1);
+                        return new IntPtr(1);   // 吞掉，别让下面的窗口跟着滚
+                    }
+                }
+            }
+            catch
+            {
+                // 钩子回调里抛异常会被系统摘掉钩子，这里一律吞掉
+            }
+
+            return NativeMethods.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
+
+        /// <summary>从鼠标下的元素往上找，看是不是某个亮度项。</summary>
+        private MonitorBrightness HitTestBrightness()
+        {
+            return FindBrightnessOwner(Mouse.DirectlyOver as DependencyObject);
+        }
+
+        /// <summary>按屏幕坐标做一次命中测试（兜底路径）。</summary>
+        private MonitorBrightness HitTestBrightnessAt(int screenX, int screenY)
+        {
+            try
+            {
+                Point client = PointFromScreen(new Point(screenX, screenY));
+                if (client.X < 0 || client.Y < 0
+                    || client.X >= ActualWidth || client.Y >= ActualHeight)
+                {
+                    return null;
+                }
+
+                return FindBrightnessOwner(InputHitTest(client) as DependencyObject);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static MonitorBrightness FindBrightnessOwner(DependencyObject hit)
+        {
+            while (hit != null)
+            {
+                FrameworkElement element = hit as FrameworkElement;
+                if (element != null && element.Tag is MonitorBrightness)
+                {
+                    return (MonitorBrightness)element.Tag;
+                }
+
+                hit = VisualTreeHelper.GetParent(hit);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 滚轮调一格：先改本地值让 UI 立刻跟手，再防抖写硬件。
+        /// 直接每格都发 DDC 的话，连续滚动会积压一堆几十毫秒的往返。
+        /// </summary>
+        private void AdjustBrightness(MonitorBrightness monitor, int direction)
+        {
+            if (monitor == null || !monitor.Controllable)
+            {
+                return;
+            }
+
+            int step = _brightnessStep < Settings.MinBrightnessStep
+                ? Settings.DefaultBrightnessStep
+                : _brightnessStep;
+
+            int current = monitor.Percent < 0 ? 50 : monitor.Percent;
+            int next = Math.Max(0, Math.Min(100, current + direction * step));
+            if (next == monitor.Percent)
+            {
+                return;
+            }
+
+            monitor.Percent = next;
+
+            // 仅图标模式要换掉水位图标，其余模式只改文字
+            Border slot;
+            if (_compact && _compactStyle == CompactStyle.IconOnly
+                && _brightnessSlots.TryGetValue(monitor.Id, out slot))
+            {
+                slot.Child = CompactIcon.Create(BrightnessGlyph, next, CompactIcon.GlyphSize);
+            }
+            else
+            {
+                TextBlock label;
+                if (_brightnessLabels.TryGetValue(monitor.Id, out label))
+                {
+                    label.Text = next + "%";
+                }
+            }
+
+            // 面板正显示时同步百分比，不然悬停看到的是旧值
+            _panel.UpdateBrightness(_monitors);
+
+            ScheduleBrightnessWrite(monitor);
+        }
+
+        private void ScheduleBrightnessWrite(MonitorBrightness monitor)
+        {
+            DispatcherTimer timer;
+            if (!_brightnessTimers.TryGetValue(monitor.Id, out timer))
+            {
+                timer = new DispatcherTimer();
+                timer.Interval = TimeSpan.FromMilliseconds(180);
+                timer.Tick += delegate
+                {
+                    timer.Stop();
+                    WriteBrightness(monitor);
+                };
+                _brightnessTimers[monitor.Id] = timer;
+            }
+
+            timer.Stop();
+            timer.Start();
+        }
+
+        private void WriteBrightness(MonitorBrightness monitor)
+        {
+            if (_destroyed || monitor == null)
+            {
+                return;
+            }
+
+            MonitorBrightness snapshot = monitor.Clone();
+            Task.Run(delegate
+            {
+                if (!BrightnessService.Set(snapshot, snapshot.Percent))
+                {
+                    Log.Write("设置亮度失败：" + snapshot.Name + " → " + snapshot.Percent + "%");
+                }
+            });
+        }
+
+        /// <summary>显示器列表变了（插拔、重新扫描）时整条重画。</summary>
+        internal void UpdateBrightness(MonitorBrightness[] monitors)
+        {
+            _monitors = monitors == null ? new MonitorBrightness[0] : monitors;
+            if (_destroyed)
+            {
+                return;
+            }
+
+            RebuildContent();
+            _panel.UpdateBrightness(_monitors);
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePosition));
+        }
+
+        /// <summary>滚轮步长变化时调用，不需要重画。</summary>
+        internal void SetBrightnessStep(int step)
+        {
+            _brightnessStep = Math.Max(Settings.MinBrightnessStep, Math.Min(Settings.MaxBrightnessStep, step));
         }
 
         /// <summary>

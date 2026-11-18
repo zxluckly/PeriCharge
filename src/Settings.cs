@@ -48,6 +48,17 @@ namespace PeripheralBattery
 
         public CompactStyle CompactStyle = CompactStyle.IconAndBattery;
 
+        /// <summary>不显示在任务栏上的显示器（按稳定设备 Id 记）。默认全显示。</summary>
+        public readonly List<string> HiddenBrightnessIds = new List<string>();
+
+        /// <summary>滚轮调亮度的步长（百分比）。</summary>
+        public const int DefaultBrightnessStep = 5;
+
+        public const int MinBrightnessStep = 1;
+        public const int MaxBrightnessStep = 20;
+
+        public int BrightnessStep = DefaultBrightnessStep;
+
         private static string FolderPath
         {
             get
@@ -151,6 +162,27 @@ namespace PeripheralBattery
                             settings.CompactStyle = CompactStyle.IconOnly;
                         }
                     }
+                    else if (key == "brightnessHidden")
+                    {
+                        settings.HiddenBrightnessIds.Clear();
+                        string[] ids = value.Split('|');
+                        foreach (string id in ids)
+                        {
+                            if (id.Length > 0)
+                            {
+                                settings.HiddenBrightnessIds.Add(id);
+                            }
+                        }
+                    }
+                    else if (key == "brightnessStep")
+                    {
+                        int step;
+                        if (int.TryParse(value, out step))
+                        {
+                            settings.BrightnessStep = Math.Max(
+                                MinBrightnessStep, Math.Min(MaxBrightnessStep, step));
+                        }
+                    }
                 }
 
                 // 旧版配置没有 configVersion。它的默认透明度是 230（约 90%），而 230
@@ -188,7 +220,9 @@ namespace PeripheralBattery
                     "hoverAlpha=" + HoverAlpha,
                     "forceCompact=" + (ForceCompact ? "1" : "0"),
                     "compactThreshold=" + CompactThreshold,
-                    "compactStyle=" + (int)CompactStyle
+                    "compactStyle=" + (int)CompactStyle,
+                    "brightnessHidden=" + string.Join("|", HiddenBrightnessIds.ToArray()),
+                    "brightnessStep=" + BrightnessStep
                 };
 
                 // 先写临时文件再整体替换：直接覆盖写时如果断电或进程被杀，

@@ -33,6 +33,7 @@ namespace PeripheralBattery
         private readonly DropShadowEffect _shadow;
 
         private DeviceBattery[] _items = new DeviceBattery[0];
+        private MonitorBrightness[] _monitors = new MonitorBrightness[0];
         private int _hoverColorArgb;
         private int _hoverAlpha = Settings.DefaultHoverAlpha;
         private IntPtr _anchor;
@@ -107,6 +108,19 @@ namespace PeripheralBattery
             if (!IsVisible)
             {
                 // 没显示时只记下数据，等 ShowAbove 一起画，省一次重建
+                return;
+            }
+
+            ApplyTheme();
+            PositionAboveAnchor();
+        }
+
+        /// <summary>显示器亮度变了：面板正显示着就重画，高度变了要重新定位。</summary>
+        internal void UpdateBrightness(MonitorBrightness[] monitors)
+        {
+            _monitors = monitors == null ? new MonitorBrightness[0] : monitors;
+            if (!IsVisible)
+            {
                 return;
             }
 
@@ -308,7 +322,7 @@ namespace PeripheralBattery
         {
             _rows.Children.Clear();
 
-            if (_items.Length == 0)
+            if (_items.Length == 0 && _monitors.Length == 0)
             {
                 TextBlock empty = new TextBlock();
                 empty.Text = "未发现可读取电量的设备";
@@ -319,19 +333,53 @@ namespace PeripheralBattery
                 return;
             }
 
-            // 面板的意义就是解释「为什么悬浮条只剩图标」，所以顶部点明台数
+            if (_items.Length > 0)
+            {
+                // 面板的意义就是解释「为什么悬浮条只剩图标」，所以顶部点明台数
+                _rows.Children.Add(CreateCaption("已连接 " + _items.Length + " 台设备"));
+
+                for (int i = 0; i < _items.Length; i++)
+                {
+                    _rows.Children.Add(CreateRow(_items[i], i > 0));
+                }
+            }
+
+            if (_monitors.Length > 0)
+            {
+                if (_items.Length > 0)
+                {
+                    _rows.Children.Add(CreateSectionDivider());
+                }
+
+                _rows.Children.Add(CreateCaption("显示器亮度"));
+
+                for (int i = 0; i < _monitors.Length; i++)
+                {
+                    _rows.Children.Add(CreateBrightnessRow(_monitors[i], i > 0));
+                }
+            }
+        }
+
+        private UIElement CreateCaption(string text)
+        {
             TextBlock caption = new TextBlock();
-            caption.Text = "已连接 " + _items.Length + " 台设备";
+            caption.Text = text;
             caption.FontFamily = new FontFamily("Segoe UI");
             caption.FontSize = 11;
             caption.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
             caption.Margin = new Thickness(0, 0, 0, 8);
-            _rows.Children.Add(caption);
+            return caption;
+        }
 
-            for (int i = 0; i < _items.Length; i++)
-            {
-                _rows.Children.Add(CreateRow(_items[i], i > 0));
-            }
+        private UIElement CreateSectionDivider()
+        {
+            Color primary = ToMediaColor(UiTheme.TextPrimary);
+
+            Border line = new Border();
+            line.Height = 1;
+            line.Margin = new Thickness(0, 9, 0, 8);
+            line.Background = new SolidColorBrush(Color.FromArgb(38, primary.R, primary.G, primary.B));
+            return line;
         }
 
         private UIElement CreateRow(DeviceBattery item, bool spaced)
@@ -387,6 +435,66 @@ namespace PeripheralBattery
 
             TextBlock value = new TextBlock();
             value.Text = valueText;
+            value.FontFamily = new FontFamily("Segoe UI");
+            value.FontSize = 12;
+            value.FontWeight = FontWeights.SemiBold;
+            value.Foreground = new SolidColorBrush(accent);
+            value.VerticalAlignment = VerticalAlignment.Center;
+            pill.Child = value;
+            Grid.SetColumn(pill, 2);
+            row.Children.Add(pill);
+
+            return row;
+        }
+
+        /// <summary>
+        /// 显示器亮度行：布局和设备行完全一致（图标 / 名称 / 胶囊），
+        /// 只有数据来源不同，这样面板上下两段看起来是同一套东西。
+        /// </summary>
+        private UIElement CreateBrightnessRow(MonitorBrightness monitor, bool spaced)
+        {
+            Color primary = ToMediaColor(UiTheme.TextPrimary);
+            Color secondary = ToMediaColor(UiTheme.TextSecondary);
+            Color accent = monitor.Percent < 0
+                ? secondary
+                : ToMediaColor(UiTheme.BatteryColor(monitor.Percent));
+
+            Grid row = new Grid();
+            row.Margin = new Thickness(0, spaced ? 7 : 0, 0, 0);
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock icon = new TextBlock();
+            icon.Text = "\uE7F4";   // Segoe MDL2 Assets：TVMonitor
+            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            icon.FontSize = 13;
+            icon.Foreground = new SolidColorBrush(secondary);
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(icon, 0);
+            row.Children.Add(icon);
+
+            TextBlock name = new TextBlock();
+            name.Text = monitor.Name;
+            name.FontFamily = new FontFamily("Segoe UI");
+            name.FontSize = 13;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            name.Foreground = new SolidColorBrush(primary);
+            name.Margin = new Thickness(8, 0, 10, 0);
+            name.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(name, 1);
+            row.Children.Add(name);
+
+            Border pill = new Border();
+            pill.CornerRadius = new CornerRadius(9);
+            pill.Padding = new Thickness(8, 1, 8, 1);
+            pill.VerticalAlignment = VerticalAlignment.Center;
+            pill.Background = new SolidColorBrush(Color.FromArgb(32, accent.R, accent.G, accent.B));
+            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(84, accent.R, accent.G, accent.B));
+            pill.BorderThickness = new Thickness(1);
+
+            TextBlock value = new TextBlock();
+            value.Text = monitor.Percent < 0 ? "--%" : monitor.Percent + "%";
             value.FontFamily = new FontFamily("Segoe UI");
             value.FontSize = 12;
             value.FontWeight = FontWeights.SemiBold;

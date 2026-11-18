@@ -38,11 +38,24 @@ namespace PeripheralBattery
                 return MakeGlyph(glyph, size, ToMediaColor(UiTheme.TextDisabled));
             }
 
-            int percent = item.Percent;
+            return Create(glyph, item.Percent, size);
+        }
+
+        /// <summary>
+        /// 通用水位图标：显示器亮度也走这里，保证和电量是同一种视觉语言。
+        /// percent &lt; 0 表示没有读数（整枚禁用色）。
+        /// </summary>
+        internal static UIElement Create(string glyph, int percent, double size)
+        {
+            if (percent < 0)
+            {
+                return MakeGlyph(glyph, size, ToMediaColor(UiTheme.TextDisabled));
+            }
+
             Color accent = ToMediaColor(UiTheme.BatteryColor(percent));
             if (percent >= 100)
             {
-                // 满电不留未填充层：留一层只会在字形顶边糊出灰描边
+                // 满格不留未填充层：留一层只会在字形顶边糊出灰描边
                 return MakeGlyph(glyph, size, accent);
             }
 

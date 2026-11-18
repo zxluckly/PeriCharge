@@ -31,6 +31,13 @@ namespace PeripheralBattery
         private static readonly Font MenuFont = new Font("Segoe UI", 9f);
         private static readonly Font MenuTitleFont = new Font("Segoe UI", 9.5f, System.Drawing.FontStyle.Bold);
 
+        /// <summary>最近一次扫到的显示器（含 DDC 不可控的，菜单里要据此判断）。</summary>
+        private MonitorBrightness[] _monitors = new MonitorBrightness[0];
+
+        private DateTime _lastBrightnessScan = DateTime.MinValue;
+        private volatile bool _brightnessScanning;
+        private string _lastBrightnessSignature = string.Empty;
+
         internal AppController(System.Windows.Application app)
         {
             _app = app;
@@ -61,6 +68,7 @@ namespace PeripheralBattery
 
             Log.Write("程序启动");
             StartRefresh();
+            StartBrightnessScan();
 
             // WPF 消息循环尚未启动时窗口 Show 不完整，延迟到应用空闲再应用初始显示状态
             System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(
@@ -76,6 +84,7 @@ namespace PeripheralBattery
             overlay.RefreshRequested += delegate { StartRefresh(true); };
             overlay.SetHoverStyle(_settings.HoverColorArgb, _settings.HoverAlpha);
             overlay.SetCompactOptions(_settings.ForceCompact, _settings.CompactThreshold, _settings.CompactStyle);
+            overlay.SetBrightnessStep(_settings.BrightnessStep);
             return overlay;
         }
 
@@ -97,7 +106,77 @@ namespace PeripheralBattery
             _overlay = CreateOverlay();
             _overlay.SetEnabled(_settings.ShowTaskbar);
             UpdateUi();
+            ApplyBrightness();
             Log.Write("资源管理器重启，已重建任务栏悬浮条");
+        }
+
+        /// <summary>
+        /// 扫一遍显示器亮度。一次 DDC 往返几十毫秒，必须后台跑；
+        /// 30 秒一轮就够——亮度主要靠滚轮改，这里只负责发现插拔和外部改动。
+        /// </summary>
+        private void StartBrightnessScan()
+        {
+            if (_brightnessScanning || _exiting)
+            {
+                return;
+            }
+
+            _brightnessScanning = true;
+            _lastBrightnessScan = DateTime.Now;
+
+            Task.Run(delegate
+            {
+                List<MonitorBrightness> scanned = BrightnessService.Scan();
+                _app.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                {
+                    _brightnessScanning = false;
+                    if (_exiting)
+                    {
+                        return;
+                    }
+
+                    _monitors = scanned.ToArray();
+                    ApplyBrightness();
+                }));
+            });
+        }
+
+        /// <summary>
+        /// 把「该显示的显示器」推给悬浮条。读不到亮度的那几台（OSD 里没开 DDC/CI、
+        /// 或者是走不了 DDC 的内置屏）不占任务栏位置，但菜单里仍然列出来并标灰。
+        /// </summary>
+        private void ApplyBrightness()
+        {
+            List<MonitorBrightness> visible = new List<MonitorBrightness>();
+            List<string> summary = new List<string>();
+
+            foreach (MonitorBrightness monitor in _monitors)
+            {
+                summary.Add(monitor.Name + "(" + monitor.Id + ")"
+                    + (monitor.Controllable ? "=" + monitor.Percent + "%" : "=不可控"));
+
+                if (!monitor.Controllable)
+                {
+                    continue;
+                }
+
+                if (_settings.HiddenBrightnessIds.Contains(monitor.Id))
+                {
+                    continue;
+                }
+
+                visible.Add(monitor);
+            }
+
+            // 只在扫描结果变化时记一条，方便排查「为什么任务栏上没有某台屏」
+            string signature = string.Join("；", summary.ToArray());
+            if (signature != _lastBrightnessSignature)
+            {
+                _lastBrightnessSignature = signature;
+                Log.Write("显示器亮度：" + (signature.Length == 0 ? "（未发现显示器）" : signature));
+            }
+
+            _overlay.UpdateBrightness(visible.ToArray());
         }
 
         /// <summary>设备树变化（插拔、休眠唤醒）时重新枚举并刷新一次。</summary>
@@ -124,6 +203,11 @@ namespace PeripheralBattery
             if (!_refreshing && (DateTime.Now - _lastRefresh).TotalSeconds >= _settings.RefreshSeconds)
             {
                 StartRefresh();
+            }
+
+            if (!_brightnessScanning && (DateTime.Now - _lastBrightnessScan).TotalSeconds >= 30)
+            {
+                StartBrightnessScan();
             }
 
             if (_service.Version != _lastVersion)
@@ -381,6 +465,7 @@ namespace PeripheralBattery
             menu.Items.Add(taskbarItem);
 
             menu.Items.Add(BuildCompactMenu());
+            menu.Items.Add(BuildBrightnessMenu());
 
             Forms.ToolStripMenuItem hoverMenu = new Forms.ToolStripMenuItem("悬停背景");
 
@@ -443,6 +528,88 @@ namespace PeripheralBattery
         /// 「显示压缩」子菜单：是否强制、超过几台开始压缩、压缩后显示成什么样。
         /// 设备一多，悬浮条按「图标 + 名称 + 胶囊」排下来能到 800 多像素，任务栏右边放不下。
         /// </summary>
+        /// <summary>
+        /// 「显示屏幕亮度」：每台显示器一个勾选项，各自决定要不要出现在任务栏上；
+        /// 下面再挂一个滚轮步长。读不到亮度的屏（OSD 里没开 DDC/CI）列出来但标灰。
+        /// </summary>
+        private Forms.ToolStripMenuItem BuildBrightnessMenu()
+        {
+            Forms.ToolStripMenuItem brightnessMenu = new Forms.ToolStripMenuItem("显示屏幕亮度");
+
+            if (_monitors.Length == 0)
+            {
+                Forms.ToolStripMenuItem none = new Forms.ToolStripMenuItem("（未检测到显示器）");
+                none.Enabled = false;
+                brightnessMenu.DropDownItems.Add(none);
+
+                // 首轮扫描还没回来时，顺手再触发一次，下次右键就有内容了
+                StartBrightnessScan();
+                return brightnessMenu;
+            }
+
+            foreach (MonitorBrightness monitor in _monitors)
+            {
+                MonitorBrightness captured = monitor;
+                string text = captured.Name;
+                if (!captured.Controllable)
+                {
+                    text += "（不支持 DDC/CI）";
+                }
+
+                Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(text);
+                item.Enabled = captured.Controllable;
+                item.CheckState = captured.Controllable
+                    && !_settings.HiddenBrightnessIds.Contains(captured.Id)
+                    ? Forms.CheckState.Checked
+                    : Forms.CheckState.Unchecked;
+                item.Click += delegate { ToggleBrightness(captured); };
+                brightnessMenu.DropDownItems.Add(item);
+            }
+
+            brightnessMenu.DropDownItems.Add(new Forms.ToolStripSeparator());
+
+            Forms.ToolStripMenuItem stepMenu = new Forms.ToolStripMenuItem("滚轮步长");
+            int[] steps = new int[] { 1, 2, 5, 10 };
+            for (int i = 0; i < steps.Length; i++)
+            {
+                int capturedStep = steps[i];
+                Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(capturedStep + "%");
+                item.CheckState = _settings.BrightnessStep == capturedStep
+                    ? Forms.CheckState.Checked
+                    : Forms.CheckState.Unchecked;
+                item.Click += delegate
+                {
+                    _settings.BrightnessStep = capturedStep;
+                    _settings.Save();
+                    _overlay.SetBrightnessStep(capturedStep);
+                };
+                stepMenu.DropDownItems.Add(item);
+            }
+            brightnessMenu.DropDownItems.Add(stepMenu);
+
+            return brightnessMenu;
+        }
+
+        private void ToggleBrightness(MonitorBrightness monitor)
+        {
+            if (monitor == null || !monitor.Controllable)
+            {
+                return;
+            }
+
+            if (_settings.HiddenBrightnessIds.Contains(monitor.Id))
+            {
+                _settings.HiddenBrightnessIds.Remove(monitor.Id);
+            }
+            else
+            {
+                _settings.HiddenBrightnessIds.Add(monitor.Id);
+            }
+
+            _settings.Save();
+            ApplyBrightness();
+        }
+
         private Forms.ToolStripMenuItem BuildCompactMenu()
         {
             Forms.ToolStripMenuItem compactMenu = new Forms.ToolStripMenuItem("显示压缩");
