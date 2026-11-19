@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -31,6 +32,22 @@ namespace PeripheralBattery
         private readonly LinearGradientBrush _backgroundBrush;
         private readonly SolidColorBrush _borderBrush;
         private readonly DropShadowEffect _shadow;
+
+        /// <summary>亮度行的胶囊和文字引用，滚轮调整时就地改值，不整块重建面板。</summary>
+        private readonly Dictionary<string, BrightnessRowRefs> _brightnessRows =
+            new Dictionary<string, BrightnessRowRefs>();
+
+        private sealed class BrightnessRowRefs
+        {
+            internal readonly Border Pill;
+            internal readonly TextBlock Value;
+
+            internal BrightnessRowRefs(Border pill, TextBlock value)
+            {
+                Pill = pill;
+                Value = value;
+            }
+        }
 
         private DeviceBattery[] _items = new DeviceBattery[0];
         private MonitorBrightness[] _monitors = new MonitorBrightness[0];
@@ -126,6 +143,29 @@ namespace PeripheralBattery
 
             ApplyTheme();
             PositionAboveAnchor();
+        }
+
+        /// <summary>
+        /// 滚轮调亮度时就地改这一行：文字和档位色一起变，不重建整张面板。
+        /// 以前滚轮只改悬浮条的图标，面板要等防抖结束才整体重建——而且拿的是
+        /// 旧扫描结果里的百分比，于是出现「图标和屏幕都变了、面板数字不动」。
+        /// </summary>
+        internal void SetBrightnessPercent(string id, int percent)
+        {
+            if (_destroyed)
+            {
+                return;
+            }
+
+            BrightnessRowRefs row;
+            if (!_brightnessRows.TryGetValue(id, out row))
+            {
+                return;
+            }
+
+            row.Value.Text = UiWidgets.FormatPercent(percent);
+            UiWidgets.ApplyPillAccent(
+                row.Pill, row.Value, UiWidgets.PercentAccent(percent, UiTheme.TextSecondary), false);
         }
 
         internal void ShowAbove(IntPtr anchor, DeviceBattery[] items)
@@ -287,22 +327,12 @@ namespace PeripheralBattery
 
         private void ApplyTheme()
         {
-            Color top;
-            Color bottom;
-
-            if (_hoverColorArgb != 0)
-            {
-                byte red = (byte)((_hoverColorArgb >> 16) & 0xFF);
-                byte green = (byte)((_hoverColorArgb >> 8) & 0xFF);
-                byte blue = (byte)(_hoverColorArgb & 0xFF);
-                top = Color.FromArgb(255, red, green, blue);
-                bottom = top;
-            }
-            else
-            {
-                top = ToMediaColor(UiTheme.BackgroundTop);
-                bottom = ToMediaColor(UiTheme.BackgroundBottom);
-            }
+            // 取色规则和悬浮条共用一份，主题/自定义颜色两边永远一致
+            System.Drawing.Color topSource;
+            System.Drawing.Color bottomSource;
+            UiWidgets.ResolveSurface(_hoverColorArgb, out topSource, out bottomSource);
+            Color top = UiWidgets.ToMediaColor(topSource);
+            Color bottom = UiWidgets.ToMediaColor(bottomSource);
 
             int alpha = _hoverAlpha;
             if (_backgroundBrush.GradientStops.Count >= 2)
@@ -311,7 +341,7 @@ namespace PeripheralBattery
                 _backgroundBrush.GradientStops[1].Color = Color.FromArgb((byte)alpha, bottom.R, bottom.G, bottom.B);
             }
 
-            _borderBrush.Color = ToMediaColor(UiTheme.Border);
+            _borderBrush.Color = UiWidgets.ToMediaColor(UiTheme.Border);
             _shadow.Opacity = Theme.IsLight() ? 0.16 : 0.28;
 
             // 文字和胶囊的颜色是建行时取的，主题一变就得重画
@@ -321,6 +351,7 @@ namespace PeripheralBattery
         private void Rebuild()
         {
             _rows.Children.Clear();
+            _brightnessRows.Clear();
 
             if (_items.Length == 0 && _monitors.Length == 0)
             {
@@ -328,7 +359,7 @@ namespace PeripheralBattery
                 empty.Text = "未发现可读取电量的设备";
                 empty.FontFamily = new FontFamily("Segoe UI");
                 empty.FontSize = 12;
-                empty.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+                empty.Foreground = new SolidColorBrush(UiWidgets.ToMediaColor(UiTheme.TextSecondary));
                 _rows.Children.Add(empty);
                 return;
             }
@@ -366,14 +397,14 @@ namespace PeripheralBattery
             caption.Text = text;
             caption.FontFamily = new FontFamily("Segoe UI");
             caption.FontSize = 11;
-            caption.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+            caption.Foreground = new SolidColorBrush(UiWidgets.ToMediaColor(UiTheme.TextSecondary));
             caption.Margin = new Thickness(0, 0, 0, 8);
             return caption;
         }
 
         private UIElement CreateSectionDivider()
         {
-            Color primary = ToMediaColor(UiTheme.TextPrimary);
+            Color primary = UiWidgets.ToMediaColor(UiTheme.TextPrimary);
 
             Border line = new Border();
             line.Height = 1;
@@ -382,69 +413,61 @@ namespace PeripheralBattery
             return line;
         }
 
-        private UIElement CreateRow(DeviceBattery item, bool spaced)
+        /// <summary>
+        /// 面板一行的公共布局：图标 / 名字（占满剩余宽度）/ 胶囊。
+        /// 设备行和亮度行走同一份代码，字号、间距、胶囊样式不会各写各的。
+        /// </summary>
+        private Grid CreateRowLayout(
+            string glyph,
+            System.Drawing.Color iconColor,
+            string name,
+            System.Drawing.Color nameColor,
+            string valueText,
+            Color accent,
+            bool dimmed,
+            bool spaced,
+            out Border pill,
+            out TextBlock value)
         {
-            bool online = item.Online;
-            Color primary = ToMediaColor(UiTheme.TextPrimary);
-            Color secondary = ToMediaColor(UiTheme.TextSecondary);
-            Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
-
             Grid row = new Grid();
             row.Margin = new Thickness(0, spaced ? 7 : 0, 0, 0);
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            TextBlock icon = new TextBlock();
-            icon.Text = UiTheme.GetIconGlyph(item.Name);
-            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
-            icon.FontSize = 13;
-            icon.Foreground = new SolidColorBrush(online ? secondary : ToMediaColor(UiTheme.TextDisabled));
-            icon.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock icon = UiWidgets.CreateGlyph(glyph, UiWidgets.GlyphSize, iconColor);
             Grid.SetColumn(icon, 0);
             row.Children.Add(icon);
 
-            TextBlock name = new TextBlock();
-            name.Text = UiTheme.GetDisplayName(item.Name);
-            name.FontFamily = new FontFamily("Segoe UI");
-            name.FontSize = 13;
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.Foreground = new SolidColorBrush(online ? primary : secondary);
-            name.Margin = new Thickness(8, 0, 10, 0);
-            name.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(name, 1);
-            row.Children.Add(name);
+            TextBlock nameBlock = UiWidgets.CreateName(name, 0, nameColor);
+            nameBlock.Margin = new Thickness(8, 0, 10, 0);
+            Grid.SetColumn(nameBlock, 1);
+            row.Children.Add(nameBlock);
 
-            Border pill = new Border();
-            pill.CornerRadius = new CornerRadius(9);
-            pill.Padding = new Thickness(8, 1, 8, 1);
-            pill.VerticalAlignment = VerticalAlignment.Center;
-            pill.Background = new SolidColorBrush(Color.FromArgb(online ? (byte)32 : (byte)16, accent.R, accent.G, accent.B));
-            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(online ? (byte)84 : (byte)38, accent.R, accent.G, accent.B));
-            pill.BorderThickness = new Thickness(1);
-
-            string valueText = online ? item.Percent + "%" : "未连接";
-            if (online && item.Charging)
-            {
-                valueText += " ⚡";
-            }
-            else if (online && item.Full)
-            {
-                valueText += " ✦";
-            }
-
-            TextBlock value = new TextBlock();
-            value.Text = valueText;
-            value.FontFamily = new FontFamily("Segoe UI");
-            value.FontSize = 12;
-            value.FontWeight = FontWeights.SemiBold;
-            value.Foreground = new SolidColorBrush(accent);
-            value.VerticalAlignment = VerticalAlignment.Center;
-            pill.Child = value;
+            pill = UiWidgets.CreatePill(valueText, accent, dimmed);
             Grid.SetColumn(pill, 2);
             row.Children.Add(pill);
+            value = (TextBlock)pill.Child;
 
             return row;
+        }
+
+        private UIElement CreateRow(DeviceBattery item, bool spaced)
+        {
+            bool online = item.Online;
+            Border pill;
+            TextBlock value;
+            return CreateRowLayout(
+                UiTheme.GetIconGlyph(item.Name),
+                online ? UiTheme.TextSecondary : UiTheme.TextDisabled,
+                UiTheme.GetDisplayName(item.Name),
+                online ? UiTheme.TextPrimary : UiTheme.TextSecondary,
+                UiWidgets.FormatBatteryValue(item),
+                UiWidgets.ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary),
+                !online,
+                spaced,
+                out pill,
+                out value);
         }
 
         /// <summary>
@@ -453,63 +476,25 @@ namespace PeripheralBattery
         /// </summary>
         private UIElement CreateBrightnessRow(MonitorBrightness monitor, bool spaced)
         {
-            Color primary = ToMediaColor(UiTheme.TextPrimary);
-            Color secondary = ToMediaColor(UiTheme.TextSecondary);
-            Color accent = monitor.Percent < 0
-                ? secondary
-                : ToMediaColor(UiTheme.BatteryColor(monitor.Percent));
+            Border pill;
+            TextBlock value;
+            Grid row = CreateRowLayout(
+                UiWidgets.MonitorGlyph,
+                UiTheme.TextSecondary,
+                monitor.Name,
+                UiTheme.TextPrimary,
+                UiWidgets.FormatPercent(monitor.Percent),
+                UiWidgets.PercentAccent(monitor.Percent, UiTheme.TextSecondary),
+                false,
+                spaced,
+                out pill,
+                out value);
 
-            Grid row = new Grid();
-            row.Margin = new Thickness(0, spaced ? 7 : 0, 0, 0);
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            TextBlock icon = new TextBlock();
-            icon.Text = "\uE7F4";   // Segoe MDL2 Assets：TVMonitor
-            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
-            icon.FontSize = 13;
-            icon.Foreground = new SolidColorBrush(secondary);
-            icon.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(icon, 0);
-            row.Children.Add(icon);
-
-            TextBlock name = new TextBlock();
-            name.Text = monitor.Name;
-            name.FontFamily = new FontFamily("Segoe UI");
-            name.FontSize = 13;
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.Foreground = new SolidColorBrush(primary);
-            name.Margin = new Thickness(8, 0, 10, 0);
-            name.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(name, 1);
-            row.Children.Add(name);
-
-            Border pill = new Border();
-            pill.CornerRadius = new CornerRadius(9);
-            pill.Padding = new Thickness(8, 1, 8, 1);
-            pill.VerticalAlignment = VerticalAlignment.Center;
-            pill.Background = new SolidColorBrush(Color.FromArgb(32, accent.R, accent.G, accent.B));
-            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(84, accent.R, accent.G, accent.B));
-            pill.BorderThickness = new Thickness(1);
-
-            TextBlock value = new TextBlock();
-            value.Text = monitor.Percent < 0 ? "--%" : monitor.Percent + "%";
-            value.FontFamily = new FontFamily("Segoe UI");
-            value.FontSize = 12;
-            value.FontWeight = FontWeights.SemiBold;
-            value.Foreground = new SolidColorBrush(accent);
-            value.VerticalAlignment = VerticalAlignment.Center;
-            pill.Child = value;
-            Grid.SetColumn(pill, 2);
-            row.Children.Add(pill);
-
+            // Tag 挂在整行上：鼠标停在面板的亮度行上滚轮也能调，
+            // 和悬浮条上的亮度项是同一套操作
+            row.Tag = monitor;
+            _brightnessRows[monitor.Id] = new BrightnessRowRefs(pill, value);
             return row;
-        }
-
-        private static Color ToMediaColor(System.Drawing.Color color)
-        {
-            return Color.FromArgb(color.A, color.R, color.G, color.B);
         }
     }
 }

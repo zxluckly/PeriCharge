@@ -35,7 +35,7 @@ namespace PeripheralBattery
             // 没读到电量就没有水位可言：整枚用禁用色，也不建填充层，和改动前一致
             if (!item.Online || item.Percent < 0)
             {
-                return MakeGlyph(glyph, size, ToMediaColor(UiTheme.TextDisabled));
+                return MakeGlyph(glyph, size, UiWidgets.ToMediaColor(UiTheme.TextDisabled));
             }
 
             return Create(glyph, item.Percent, size);
@@ -49,10 +49,10 @@ namespace PeripheralBattery
         {
             if (percent < 0)
             {
-                return MakeGlyph(glyph, size, ToMediaColor(UiTheme.TextDisabled));
+                return MakeGlyph(glyph, size, UiWidgets.ToMediaColor(UiTheme.TextDisabled));
             }
 
-            Color accent = ToMediaColor(UiTheme.BatteryColor(percent));
+            Color accent = UiWidgets.ToMediaColor(UiTheme.BatteryColor(percent));
             if (percent >= 100)
             {
                 // 满格不留未填充层：留一层只会在字形顶边糊出灰描边
@@ -110,11 +110,6 @@ namespace PeripheralBattery
             FormattedText formatted = new FormattedText(
                 glyph, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, IconFace, size, Brushes.Black, 1.0);
             return formatted.BuildGeometry(new Point(0, 0)).Bounds;
-        }
-
-        private static Color ToMediaColor(System.Drawing.Color color)
-        {
-            return Color.FromArgb(color.A, color.R, color.G, color.B);
         }
     }
 }

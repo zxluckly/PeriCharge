@@ -601,12 +601,39 @@ namespace PeripheralBattery
         {
             try
             {
-                DISPLAY_DEVICE device = new DISPLAY_DEVICE();
-                device.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
-                if (EnumDisplayDevices(deviceName, 0, ref device, 0)
-                    && !string.IsNullOrEmpty(device.DeviceID))
+                // 一个适配器下可能挂多个 monitor 设备（内置屏 + 外接屏共用适配器时很常见），
+                // 固定取 0 号不一定是当前在用的那块——实测外接屏在用，
+                // Id 却记成了内置屏的 MONITOR\BOE...，多个不同适配器时还可能撞号。
+                // 优先取「已挂到桌面」的那块（DISPLAY_DEVICE_ATTACHED_TO_DESKTOP）。
+                DISPLAY_DEVICE first = new DISPLAY_DEVICE();
+                bool hasFirst = false;
+
+                for (uint index = 0; index < 16; index++)
                 {
-                    return device.DeviceID;
+                    DISPLAY_DEVICE device = new DISPLAY_DEVICE();
+                    device.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+                    if (!EnumDisplayDevices(deviceName, index, ref device, 0))
+                    {
+                        break;
+                    }
+
+                    if (!hasFirst)
+                    {
+                        first = device;
+                        hasFirst = true;
+                    }
+
+                    if ((device.StateFlags & 0x00000001) != 0
+                        && !string.IsNullOrEmpty(device.DeviceID))
+                    {
+                        return device.DeviceID;
+                    }
+                }
+
+                // 全部不在桌面上（显示器刚拔掉/正在切换）时退回 0 号，保持和旧行为一致
+                if (hasFirst && !string.IsNullOrEmpty(first.DeviceID))
+                {
+                    return first.DeviceID;
                 }
             }
             catch

@@ -46,6 +46,9 @@ namespace PeripheralBattery
         /// <summary>亮度项的文字块，滚轮调整时直接改文字，不重建整条。</summary>
         private readonly Dictionary<string, TextBlock> _brightnessLabels = new Dictionary<string, TextBlock>();
 
+        /// <summary>亮度项的胶囊，滚轮跨过红/黄/绿分界时要同步换色。</summary>
+        private readonly Dictionary<string, Border> _brightnessPills = new Dictionary<string, Border>();
+
         /// <summary>仅图标模式下亮度项的容器，滚轮调整时换掉里面的水位图标。</summary>
         private readonly Dictionary<string, Border> _brightnessSlots = new Dictionary<string, Border>();
 
@@ -685,23 +688,12 @@ namespace PeripheralBattery
 
         private void ApplyTheme()
         {
-            Color top;
-            Color bottom;
-
-            if (_hoverColorArgb != 0)
-            {
-                byte red = (byte)((_hoverColorArgb >> 16) & 0xFF);
-                byte green = (byte)((_hoverColorArgb >> 8) & 0xFF);
-                byte blue = (byte)(_hoverColorArgb & 0xFF);
-                top = Color.FromArgb(255, red, green, blue);
-                bottom = top;
-            }
-            else
-            {
-                // 跟随系统只决定颜色，不透明度仍由用户设置决定
-                top = ToMediaColor(UiTheme.BackgroundTop);
-                bottom = ToMediaColor(UiTheme.BackgroundBottom);
-            }
+            // 跟随系统只决定颜色，不透明度仍由用户设置决定；取色规则和面板共用一份
+            System.Drawing.Color topSource;
+            System.Drawing.Color bottomSource;
+            UiWidgets.ResolveSurface(_hoverColorArgb, out topSource, out bottomSource);
+            Color top = UiWidgets.ToMediaColor(topSource);
+            Color bottom = UiWidgets.ToMediaColor(bottomSource);
 
             int alpha = _hoverAlpha;
 
@@ -711,9 +703,9 @@ namespace PeripheralBattery
                 _backgroundBrush.GradientStops[1].Color = Color.FromArgb((byte)alpha, bottom.R, bottom.G, bottom.B);
             }
 
-            _borderBrush.Color = ToMediaColor(UiTheme.Border);
+            _borderBrush.Color = UiWidgets.ToMediaColor(UiTheme.Border);
 
-            Color text = ToMediaColor(UiTheme.TextPrimary);
+            Color text = UiWidgets.ToMediaColor(UiTheme.TextPrimary);
             _buttonHoverBrush.Color = Color.FromArgb(60, text.R, text.G, text.B);
             _refreshButton.Background = new SolidColorBrush(Color.FromArgb(30, text.R, text.G, text.B));
             _refreshButton.BorderBrush = new SolidColorBrush(Color.FromArgb(60, text.R, text.G, text.B));
@@ -771,6 +763,7 @@ namespace PeripheralBattery
         {
             _content.Children.Clear();
             _brightnessLabels.Clear();
+            _brightnessPills.Clear();
             _brightnessSlots.Clear();
 
             // 设备多了就把设备名去掉：四台按「图标 + 名字 + 胶囊」排下来要 800 多像素，
@@ -783,7 +776,7 @@ namespace PeripheralBattery
                 empty.Text = _emptyText;
                 empty.FontFamily = new FontFamily("Segoe UI");
                 empty.FontSize = 13;
-                empty.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+                empty.Foreground = new SolidColorBrush(UiWidgets.ToMediaColor(UiTheme.TextSecondary));
                 empty.VerticalAlignment = VerticalAlignment.Center;
                 _content.Children.Add(empty);
                 return;
@@ -822,7 +815,7 @@ namespace PeripheralBattery
             dot.Height = 2;
             dot.Margin = new Thickness(14, 0, 14, 0);
             dot.VerticalAlignment = VerticalAlignment.Center;
-            dot.Fill = new SolidColorBrush(ToMediaColor(UiTheme.TextSecondary));
+            dot.Fill = new SolidColorBrush(UiWidgets.ToMediaColor(UiTheme.TextSecondary));
             dot.Opacity = 0.45;
             return dot;
         }
@@ -840,71 +833,40 @@ namespace PeripheralBattery
             // 仅图标模式：和电量一样用图标里的水位表示高低，颜色也复用同一套阈值
             if (_compact && _compactStyle == CompactStyle.IconOnly)
             {
-                hit.Child = CompactIcon.Create(BrightnessGlyph, monitor.Percent, CompactIcon.GlyphSize);
+                hit.Child = CompactIcon.Create(UiWidgets.MonitorGlyph, monitor.Percent, CompactIcon.GlyphSize);
                 _brightnessSlots[monitor.Id] = hit;
                 return hit;
             }
 
-            Color secondary = ToMediaColor(UiTheme.TextSecondary);
-
             // 和电量用同一套阈值配色：低 → 红、中 → 黄、高 → 绿，
             // 一眼就能看出哪块屏偏暗，视觉语言和电量段完全一致
-            Color accent = monitor.Percent < 0
-                ? secondary
-                : ToMediaColor(UiTheme.BatteryColor(monitor.Percent));
+            Color accent = UiWidgets.PercentAccent(monitor.Percent, UiTheme.TextSecondary);
 
             StackPanel panel = new StackPanel();
             panel.Orientation = Orientation.Horizontal;
             panel.VerticalAlignment = VerticalAlignment.Center;
 
-            TextBlock icon = new TextBlock();
-            icon.Text = BrightnessGlyph;
-            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
-            icon.FontSize = 13;
-            icon.Foreground = new SolidColorBrush(secondary);
-            icon.VerticalAlignment = VerticalAlignment.Center;
-            panel.Children.Add(icon);
+            panel.Children.Add(UiWidgets.CreateGlyph(
+                UiWidgets.MonitorGlyph, UiWidgets.GlyphSize, UiTheme.TextSecondary));
 
             if (!_compact)
             {
-                TextBlock name = new TextBlock();
-                name.Text = monitor.Name;
-                name.FontFamily = new FontFamily("Segoe UI");
-                name.FontSize = 13;
-                name.MaxWidth = 160;
-                name.TextTrimming = TextTrimming.CharacterEllipsis;
-                name.Foreground = new SolidColorBrush(ToMediaColor(UiTheme.TextPrimary));
-                name.Margin = new Thickness(6, 0, 0, 0);
-                name.VerticalAlignment = VerticalAlignment.Center;
+                TextBlock name = UiWidgets.CreateName(
+                    monitor.Name, UiWidgets.NameMaxWidth, UiTheme.TextPrimary);
+                name.Margin = new Thickness(UiWidgets.IconGap, 0, 0, 0);
                 panel.Children.Add(name);
             }
 
-            Border pill = new Border();
-            pill.CornerRadius = new CornerRadius(9);
-            pill.Padding = new Thickness(8, 1, 8, 1);
-            pill.VerticalAlignment = VerticalAlignment.Center;
-            pill.Background = new SolidColorBrush(Color.FromArgb(32, accent.R, accent.G, accent.B));
-            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(84, accent.R, accent.G, accent.B));
-            pill.BorderThickness = new Thickness(1);
-            pill.Margin = new Thickness(6, 0, 0, 0);
-
-            TextBlock value = new TextBlock();
-            value.Text = monitor.Percent < 0 ? "--%" : monitor.Percent + "%";
-            value.FontFamily = new FontFamily("Segoe UI");
-            value.FontSize = 12;
-            value.FontWeight = FontWeights.SemiBold;
-            value.Foreground = new SolidColorBrush(accent);
-            value.VerticalAlignment = VerticalAlignment.Center;
-            pill.Child = value;
+            Border pill = UiWidgets.CreatePill(
+                UiWidgets.FormatPercent(monitor.Percent), accent, false);
+            pill.Margin = new Thickness(_compact ? UiWidgets.IconGap : UiWidgets.NamePillGap, 0, 0, 0);
             panel.Children.Add(pill);
 
-            _brightnessLabels[monitor.Id] = value;
+            _brightnessLabels[monitor.Id] = (TextBlock)pill.Child;
+            _brightnessPills[monitor.Id] = pill;
             hit.Child = panel;
             return hit;
         }
-
-        /// <summary>Segoe MDL2 Assets 的 TVMonitor，电量和亮度两段共用同一枚显示器图标。</summary>
-        private const string BrightnessGlyph = "\uE7F4";
 
         // ---- 滚轮：悬浮条是 WS_EX_NOACTIVATE 的窗口，常规 WM_MOUSEWHEEL 收不到
         //      （系统默认只发给焦点窗口），所以挂一个低级鼠标钩子自己判断光标位置 ----
@@ -993,13 +955,39 @@ namespace PeripheralBattery
             return NativeMethods.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
-        /// <summary>从鼠标下的元素往上找，看是不是某个亮度项。</summary>
+        /// <summary>
+        /// 从鼠标下的元素往上找，看是不是某个亮度项。
+        /// DirectlyOver 在分层窗口未参与命中链、或鼠标刚移入时会返回 null，
+        /// 再按屏幕坐标做一次 InputHitTest 兜底，否则偶尔滚不动。
+        /// </summary>
         private MonitorBrightness HitTestBrightness()
         {
-            return FindBrightnessOwner(Mouse.DirectlyOver as DependencyObject);
+            MonitorBrightness owner = FindBrightnessOwner(Mouse.DirectlyOver as DependencyObject);
+            if (owner != null)
+            {
+                return owner;
+            }
+
+            NativeMethods.POINT cursor;
+            if (!NativeMethods.GetCursorPos(out cursor))
+            {
+                return null;
+            }
+
+            try
+            {
+                System.Windows.Point local = PointFromScreen(
+                    new System.Windows.Point(cursor.X, cursor.Y));
+                return FindBrightnessOwner(InputHitTest(local) as DependencyObject);
+            }
+            catch
+            {
+                // 窗口尚未完成布局时 PointFromScreen 可能抛异常，按未命中处理
+                return null;
+            }
         }
 
-        /// <summary>按屏幕坐标做一次命中测试（兜底路径）。</summary>
+        /// <summary>从命中元素沿视觉树往上找带亮度 Tag 的项。</summary>
         private static MonitorBrightness FindBrightnessOwner(DependencyObject hit)
         {
             while (hit != null)
@@ -1019,10 +1007,21 @@ namespace PeripheralBattery
         /// <summary>
         /// 滚轮调一格：先改本地值让 UI 立刻跟手，再防抖写硬件。
         /// 直接每格都发 DDC 的话，连续滚动会积压一堆几十毫秒的往返。
+        ///
+        /// 传进来的 <paramref name="monitor"/> 是亮度项 Tag 上挂的对象，可能是
+        /// 上一轮扫描留下的旧实例（内容指纹没变时视觉树不会重建）。所以这里必须
+        /// 按 Id 回到 <see cref="_monitors"/> 里重新取当前对象，否则面板拿到的是
+        /// 新数组里的旧百分比——表现就是图标和屏幕都动了、悬停面板数值不动。
         /// </summary>
         private void AdjustBrightness(MonitorBrightness monitor, int direction)
         {
-            if (monitor == null || !monitor.Controllable)
+            if (monitor == null)
+            {
+                return;
+            }
+
+            MonitorBrightness current = FindMonitor(monitor.Id);
+            if (current == null || !current.Controllable)
             {
                 return;
             }
@@ -1031,35 +1030,64 @@ namespace PeripheralBattery
                 ? Settings.DefaultBrightnessStep
                 : _brightnessStep;
 
-            int current = monitor.Percent < 0 ? 50 : monitor.Percent;
-            int next = Math.Max(0, Math.Min(100, current + direction * step));
-            if (next == monitor.Percent)
+            int from = current.Percent < 0 ? 50 : current.Percent;
+            int next = Math.Max(0, Math.Min(100, from + direction * step));
+            if (next == current.Percent)
             {
                 return;
             }
 
-            monitor.Percent = next;
+            current.Percent = next;
+            ApplyBrightnessVisual(current.Id, next);
+            _panel.SetBrightnessPercent(current.Id, next);
 
-            // 仅图标模式要换掉水位图标，其余模式只改文字
-            Border slot;
-            if (_compact && _compactStyle == CompactStyle.IconOnly
-                && _brightnessSlots.TryGetValue(monitor.Id, out slot))
+            // 指纹按更新后的 _monitors 算，下一轮扫描不会因为「内容变了」白重建一次
+            _contentSignature = BuildContentSignature();
+            ScheduleBrightnessWrite(current);
+        }
+
+        /// <summary>按 Id 找当前扫描结果里的那台显示器（不持有、不捕获对象本身）。</summary>
+        private MonitorBrightness FindMonitor(string id)
+        {
+            for (int i = 0; i < _monitors.Length; i++)
             {
-                slot.Child = CompactIcon.Create(BrightnessGlyph, next, CompactIcon.GlyphSize);
-            }
-            else
-            {
-                TextBlock label;
-                if (_brightnessLabels.TryGetValue(monitor.Id, out label))
+                if (_monitors[i].Id == id)
                 {
-                    label.Text = next + "%";
+                    return _monitors[i];
                 }
             }
 
-            // 面板的百分比等防抖结束再更新：连滚时每次都重建面板会闪，
-            // 而且重建比改一个文字块贵得多
-            _contentSignature = BuildContentSignature();
-            ScheduleBrightnessWrite(monitor);
+            return null;
+        }
+
+        /// <summary>
+        /// 就地刷新某一项亮度：仅图标模式换水位图标，带胶囊的模式同时改文字和档位色。
+        /// 悬浮条和面板各自维护自己的引用，滚轮时都走同一套刷新逻辑。
+        /// </summary>
+        private void ApplyBrightnessVisual(string id, int percent)
+        {
+            Border slot;
+            if (_compact && _compactStyle == CompactStyle.IconOnly
+                && _brightnessSlots.TryGetValue(id, out slot))
+            {
+                slot.Child = CompactIcon.Create(UiWidgets.MonitorGlyph, percent, CompactIcon.GlyphSize);
+                return;
+            }
+
+            TextBlock value;
+            if (!_brightnessLabels.TryGetValue(id, out value))
+            {
+                return;
+            }
+
+            value.Text = UiWidgets.FormatPercent(percent);
+
+            Border pill;
+            if (_brightnessPills.TryGetValue(id, out pill))
+            {
+                UiWidgets.ApplyPillAccent(
+                    pill, value, UiWidgets.PercentAccent(percent, UiTheme.TextSecondary), false);
+            }
         }
 
         private void ScheduleBrightnessWrite(MonitorBrightness monitor)
@@ -1080,8 +1108,8 @@ namespace PeripheralBattery
                 {
                     timer.Stop();
 
-                    // 滚轮停了才同步面板，连滚过程中不重建
-                    _panel.UpdateBrightness(_monitors);
+                    // 面板的数值和配色在 AdjustBrightness 里已经就地更新过了，
+                    // 这里不再整块重建——重建比改一个文字块贵，还会闪一下
                     WriteBrightness(id);
                 };
                 _brightnessTimers[monitor.Id] = timer;
@@ -1105,16 +1133,7 @@ namespace PeripheralBattery
                 return;
             }
 
-            MonitorBrightness current = null;
-            for (int i = 0; i < _monitors.Length; i++)
-            {
-                if (_monitors[i].Id == id)
-                {
-                    current = _monitors[i];
-                    break;
-                }
-            }
-
+            MonitorBrightness current = FindMonitor(id);
             if (current == null)
             {
                 return;
@@ -1159,30 +1178,14 @@ namespace PeripheralBattery
                 return;
             }
 
-            for (int i = 0; i < _monitors.Length; i++)
+            MonitorBrightness current = FindMonitor(id);
+            if (current != null)
             {
-                if (_monitors[i].Id == id)
-                {
-                    _monitors[i].Percent = percent;
-                }
+                current.Percent = percent;
             }
 
-            Border slot;
-            if (_compact && _compactStyle == CompactStyle.IconOnly
-                && _brightnessSlots.TryGetValue(id, out slot))
-            {
-                slot.Child = CompactIcon.Create(BrightnessGlyph, percent, CompactIcon.GlyphSize);
-            }
-            else
-            {
-                TextBlock label;
-                if (_brightnessLabels.TryGetValue(id, out label))
-                {
-                    label.Text = percent + "%";
-                }
-            }
-
-            _panel.UpdateBrightness(_monitors);
+            ApplyBrightnessVisual(id, percent);
+            _panel.SetBrightnessPercent(id, percent);
             _contentSignature = BuildContentSignature();
         }
 
@@ -1213,7 +1216,7 @@ namespace PeripheralBattery
         private UIElement CreateCompactDeviceView(DeviceBattery item)
         {
             bool online = item.Online;
-            Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
+            System.Drawing.Color accentSource = online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary;
 
             if (_compactStyle == CompactStyle.IconOnly)
             {
@@ -1226,16 +1229,13 @@ namespace PeripheralBattery
             panel.Orientation = Orientation.Horizontal;
             panel.VerticalAlignment = VerticalAlignment.Center;
 
-            TextBlock icon = new TextBlock();
-            icon.Text = UiTheme.GetIconGlyph(item.Name);
-            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
-            icon.FontSize = 13;
-            icon.Foreground = new SolidColorBrush(online ? ToMediaColor(UiTheme.TextSecondary) : ToMediaColor(UiTheme.TextDisabled));
-            icon.VerticalAlignment = VerticalAlignment.Center;
-            panel.Children.Add(icon);
+            panel.Children.Add(UiWidgets.CreateGlyph(
+                UiTheme.GetIconGlyph(item.Name), UiWidgets.GlyphSize,
+                online ? UiTheme.TextSecondary : UiTheme.TextDisabled));
 
-            Border pill = CreateBatteryPill(item, accent, online);
-            pill.Margin = new Thickness(6, 0, 0, 0);
+            Border pill = UiWidgets.CreatePill(
+                UiWidgets.FormatBatteryValue(item), UiWidgets.ToMediaColor(accentSource), !online);
+            pill.Margin = new Thickness(UiWidgets.IconGap, 0, 0, 0);
             panel.Children.Add(pill);
 
             return panel;
@@ -1244,75 +1244,28 @@ namespace PeripheralBattery
         private UIElement CreateDeviceView(DeviceBattery item)
         {
             bool online = item.Online;
-            Color primary = ToMediaColor(UiTheme.TextPrimary);
-            Color secondary = ToMediaColor(UiTheme.TextSecondary);
-            Color accent = ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary);
+            System.Drawing.Color accentSource = online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary;
 
             StackPanel panel = new StackPanel();
             panel.Orientation = Orientation.Horizontal;
             panel.VerticalAlignment = VerticalAlignment.Center;
 
-            TextBlock icon = new TextBlock();
-            icon.Text = UiTheme.GetIconGlyph(item.Name);
-            icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
-            icon.FontSize = 13;
-            icon.Foreground = new SolidColorBrush(online ? secondary : ToMediaColor(UiTheme.TextDisabled));
-            icon.VerticalAlignment = VerticalAlignment.Center;
-            panel.Children.Add(icon);
+            panel.Children.Add(UiWidgets.CreateGlyph(
+                UiTheme.GetIconGlyph(item.Name), UiWidgets.GlyphSize,
+                online ? UiTheme.TextSecondary : UiTheme.TextDisabled));
 
-            TextBlock name = new TextBlock();
-            name.Text = UiTheme.GetDisplayName(item.Name);
-            name.FontFamily = new FontFamily("Segoe UI");
-            name.FontSize = 13;
-            name.MaxWidth = 180;
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.Foreground = new SolidColorBrush(online ? primary : secondary);
-            name.Margin = new Thickness(6, 0, 0, 0);
-            name.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock name = UiWidgets.CreateName(
+                UiTheme.GetDisplayName(item.Name), UiWidgets.NameMaxWidth,
+                online ? UiTheme.TextPrimary : UiTheme.TextSecondary);
+            name.Margin = new Thickness(UiWidgets.IconGap, 0, 0, 0);
             panel.Children.Add(name);
 
-            Border pill = CreateBatteryPill(item, accent, online);
-            pill.Margin = new Thickness(8, 0, 0, 0);
+            Border pill = UiWidgets.CreatePill(
+                UiWidgets.FormatBatteryValue(item), UiWidgets.ToMediaColor(accentSource), !online);
+            pill.Margin = new Thickness(UiWidgets.NamePillGap, 0, 0, 0);
             panel.Children.Add(pill);
 
             return panel;
-        }
-
-        /// <summary>电量胶囊，常规模式和紧凑模式共用同一套样式。</summary>
-        private static Border CreateBatteryPill(DeviceBattery item, Color accent, bool online)
-        {
-            Border pill = new Border();
-            pill.CornerRadius = new CornerRadius(9);
-            pill.Padding = new Thickness(8, 1, 8, 1);
-            pill.VerticalAlignment = VerticalAlignment.Center;
-            pill.Background = new SolidColorBrush(Color.FromArgb(online ? (byte)32 : (byte)16, accent.R, accent.G, accent.B));
-            pill.BorderBrush = new SolidColorBrush(Color.FromArgb(online ? (byte)84 : (byte)38, accent.R, accent.G, accent.B));
-            pill.BorderThickness = new Thickness(1);
-
-            string valueText = online ? item.Percent + "%" : "未连接";
-            if (online && item.Charging)
-            {
-                valueText += " ⚡";
-            }
-            else if (online && item.Full)
-            {
-                valueText += " ✦";
-            }
-
-            TextBlock value = new TextBlock();
-            value.Text = valueText;
-            value.FontFamily = new FontFamily("Segoe UI");
-            value.FontSize = 12;
-            value.FontWeight = FontWeights.SemiBold;
-            value.Foreground = new SolidColorBrush(accent);
-            value.VerticalAlignment = VerticalAlignment.Center;
-            pill.Child = value;
-            return pill;
-        }
-
-        private static Color ToMediaColor(System.Drawing.Color color)
-        {
-            return Color.FromArgb(color.A, color.R, color.G, color.B);
         }
     }
 }
