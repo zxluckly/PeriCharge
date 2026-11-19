@@ -8,6 +8,19 @@ using System.Windows.Media.Effects;
 
 namespace PeripheralBattery
 {
+    /// <summary>面板亮度滑块改值：只带 Id 和数值，不捕获扫描对象。</summary>
+    internal sealed class BrightnessSliderEventArgs : EventArgs
+    {
+        internal readonly string Id;
+        internal readonly int Percent;
+
+        internal BrightnessSliderEventArgs(string id, int percent)
+        {
+            Id = id;
+            Percent = percent;
+        }
+    }
+
     /// <summary>
     /// 悬浮条的详情面板。设备多到悬浮条只放得下图标时，鼠标移上去弹出这张卡片，
     /// 把每台设备的名称、电量和充电状态一次列全。
@@ -41,20 +54,43 @@ namespace PeripheralBattery
         {
             internal readonly Border Pill;
             internal readonly TextBlock Value;
+            internal readonly NeumorphicSlider Slider;
 
-            internal BrightnessRowRefs(Border pill, TextBlock value)
+            internal BrightnessRowRefs(Border pill, TextBlock value, NeumorphicSlider slider)
             {
                 Pill = pill;
                 Value = value;
+                Slider = slider;
             }
         }
 
         private DeviceBattery[] _items = new DeviceBattery[0];
         private MonitorBrightness[] _monitors = new MonitorBrightness[0];
+        private string _brightnessSignature = string.Empty;
         private int _hoverColorArgb;
         private int _hoverAlpha = Settings.DefaultHoverAlpha;
         private IntPtr _anchor;
         private bool _destroyed;
+
+        /// <summary>用户拖动亮度滑块时触发，由悬浮条负责防抖写硬件。</summary>
+        internal event EventHandler<BrightnessSliderEventArgs> BrightnessSliderChanged;
+
+        /// <summary>正在拖动滑块：此时不要让悬浮条的悬停定时器把面板收掉。</summary>
+        internal bool IsDragging
+        {
+            get
+            {
+                foreach (BrightnessRowRefs row in _brightnessRows.Values)
+                {
+                    if (row.Slider != null && row.Slider.IsDragging)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
 
         internal WpfDetailPanel()
         {
@@ -141,6 +177,13 @@ namespace PeripheralBattery
                 return;
             }
 
+            // 数值没变就不重建：拖动滑块期间每 30 秒扫描一次，
+            // 无谓的重建会把正在拖的滑块换掉。真变了才重画
+            if (BuildBrightnessSignature() == _brightnessSignature)
+            {
+                return;
+            }
+
             ApplyTheme();
             PositionAboveAnchor();
         }
@@ -163,9 +206,22 @@ namespace PeripheralBattery
                 return;
             }
 
+            Color accent = UiWidgets.PercentAccent(percent, UiTheme.TextSecondary);
             row.Value.Text = UiWidgets.FormatPercent(percent);
-            UiWidgets.ApplyPillAccent(
-                row.Pill, row.Value, UiWidgets.PercentAccent(percent, UiTheme.TextSecondary), false);
+            UiWidgets.ApplyPillAccent(row.Pill, row.Value, accent, false);
+            row.Slider.SetValue(percent);
+            row.Slider.SetAccent(accent);
+        }
+
+        private string BuildBrightnessSignature()
+        {
+            string signature = string.Empty;
+            for (int i = 0; i < _monitors.Length; i++)
+            {
+                signature += _monitors[i].Id + ":" + _monitors[i].Percent + ";";
+            }
+
+            return signature;
         }
 
         internal void ShowAbove(IntPtr anchor, DeviceBattery[] items)
@@ -352,6 +408,7 @@ namespace PeripheralBattery
         {
             _rows.Children.Clear();
             _brightnessRows.Clear();
+            _brightnessSignature = BuildBrightnessSignature();
 
             if (_items.Length == 0 && _monitors.Length == 0)
             {
@@ -493,8 +550,53 @@ namespace PeripheralBattery
             // Tag 挂在整行上：鼠标停在面板的亮度行上滚轮也能调，
             // 和悬浮条上的亮度项是同一套操作
             row.Tag = monitor;
-            _brightnessRows[monitor.Id] = new BrightnessRowRefs(pill, value);
-            return row;
+
+            NeumorphicSlider slider = CreateBrightnessSlider(monitor);
+            _brightnessRows[monitor.Id] = new BrightnessRowRefs(pill, value, slider);
+
+            // 第二行放滑块：左边缘和名字对齐（图标宽度），不横跨图标列
+            StackPanel container = new StackPanel();
+            container.Orientation = Orientation.Vertical;
+            container.Children.Add(row);
+            container.Children.Add(slider);
+            return container;
+        }
+
+        private NeumorphicSlider CreateBrightnessSlider(MonitorBrightness monitor)
+        {
+            System.Drawing.Color top;
+            System.Drawing.Color bottom;
+            UiWidgets.ResolveSurface(_hoverColorArgb, out top, out bottom);
+
+            // 滑块在面板下半部，取上下渐变的中间色当「背景色」，
+            // 凸起的高光和暗影才会贴着实际面板底色，而不是浮在另一个色阶上
+            System.Drawing.Color surface = System.Drawing.Color.FromArgb(
+                255,
+                (top.R + bottom.R) / 2,
+                (top.G + bottom.G) / 2,
+                (top.B + bottom.B) / 2);
+
+            NeumorphicSlider slider = NeumorphicSlider.Create(
+                monitor.Percent,
+                UiWidgets.PercentAccent(monitor.Percent, UiTheme.TextSecondary),
+                UiWidgets.ToMediaColor(surface),
+                Theme.IsLight());
+            slider.Margin = new Thickness(UiWidgets.GlyphSize, 4, 0, 0);
+
+            // 滚轮也认滑块本身：Tag 挂上显示器，低层钩子命中的判断和悬浮条一致
+            slider.Tag = monitor;
+
+            // 只捕获 Id，不捕获每轮扫描都会重建的 monitor 对象（见交接文档坑 1 / 坑 7）
+            string id = monitor.Id;
+            slider.ValueChanged += delegate
+            {
+                EventHandler<BrightnessSliderEventArgs> handler = BrightnessSliderChanged;
+                if (handler != null)
+                {
+                    handler(this, new BrightnessSliderEventArgs(id, (int)slider.Value));
+                }
+            };
+            return slider;
         }
     }
 }

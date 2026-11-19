@@ -205,6 +205,10 @@ namespace PeripheralBattery
 
             // 紧凑模式的详情面板：鼠标移上去才弹
             _panel = new WpfDetailPanel();
+            _panel.BrightnessSliderChanged += delegate(object sender, BrightnessSliderEventArgs e)
+            {
+                SetBrightnessFromSlider(e.Id, e.Percent);
+            };
 
             // 鼠标从悬浮条挪到面板上时，悬浮条的 MouseLeave 会先到，
             // 只靠进出事件会在半路把面板收掉。所以弹出后改成定时看光标位置：
@@ -536,7 +540,8 @@ namespace PeripheralBattery
         {
             // 紧凑模式下鼠标常要从悬浮条挪到详情面板上，这一路不算「离开」，
             // 否则面板刚弹出来就被自己收掉了。真正该收的时机交给 _hoverTimer 判断。
-            if (!hovered && _hovered && IsCursorInsidePanel())
+            // 拖动滑块时鼠标可能被捕获到面板外，同样不能当成离开
+            if (!hovered && _hovered && (_panel.IsDragging || IsCursorInsidePanel()))
             {
                 return;
             }
@@ -608,7 +613,8 @@ namespace PeripheralBattery
                 return;
             }
 
-            if (IsCursorInBar(cursor) || _panel.ContainsScreenPoint(cursor.X, cursor.Y))
+            if (IsCursorInBar(cursor) || _panel.IsDragging
+                || _panel.ContainsScreenPoint(cursor.X, cursor.Y))
             {
                 return;
             }
@@ -1042,6 +1048,31 @@ namespace PeripheralBattery
             _panel.SetBrightnessPercent(current.Id, next);
 
             // 指纹按更新后的 _monitors 算，下一轮扫描不会因为「内容变了」白重建一次
+            _contentSignature = BuildContentSignature();
+            ScheduleBrightnessWrite(current);
+        }
+
+        /// <summary>
+        /// 面板滑块拖到某个值：和滚轮共用同一条链路——改当前对象、刷新悬浮条、
+        /// 180ms 防抖后写硬件。滑块自己已经跟手，这里只负责数据和硬件。
+        /// </summary>
+        private void SetBrightnessFromSlider(string id, int percent)
+        {
+            MonitorBrightness current = FindMonitor(id);
+            if (current == null || !current.Controllable)
+            {
+                return;
+            }
+
+            int target = Math.Max(0, Math.Min(100, percent));
+            if (target == current.Percent)
+            {
+                return;
+            }
+
+            current.Percent = target;
+            ApplyBrightnessVisual(id, target);
+            _panel.SetBrightnessPercent(id, target);
             _contentSignature = BuildContentSignature();
             ScheduleBrightnessWrite(current);
         }
