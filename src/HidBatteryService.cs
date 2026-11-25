@@ -114,19 +114,30 @@ namespace PeripheralBattery
 
                 HidDeviceInfo usb = null;
                 HidDeviceInfo bluetooth = null;
+                List<HidDeviceInfo> receivers = new List<HidDeviceInfo>();
+
                 foreach (HidDeviceInfo device in group)
                 {
-                    if (IsUsbTransport(device.DevicePath))
-                    {
-                        usb = device;
-                    }
-                    else
+                    if (!IsUsbTransport(device.DevicePath))
                     {
                         bluetooth = device;
+                        continue;
                     }
+
+                    // 仿冒 DualSense 的接收器不能参与「USB + 蓝牙」合并：
+                    // 它也在 USB 上，会把真手柄的蓝牙读数顶掉，合并出来的还是它的假电量，
+                    // 再被自动隐藏，用户就一台设备都看不到了
+                    if (!IsGenuineDualSense(device))
+                    {
+                        receivers.Add(device);
+                        continue;
+                    }
+
+                    usb = device;
                 }
 
-                if (usb != null && bluetooth != null && group.Count == 2)
+                int considered = (usb != null ? 1 : 0) + (bluetooth != null ? 1 : 0);
+                if (considered == 2)
                 {
                     attempts++;
                     DeviceBattery fromUsb = ReadDualSense(usb);
@@ -134,23 +145,42 @@ namespace PeripheralBattery
                     {
                         succeeded++;
                         result.Add(fromUsb);
-                        continue;
                     }
-
-                    attempts++;
-                    DeviceBattery fromBluetooth = ReadDualSense(bluetooth);
-                    if (fromBluetooth != null)
+                    else
                     {
-                        succeeded++;
-                        result.Add(fromBluetooth);
+                        attempts++;
+                        DeviceBattery fromBluetooth = ReadDualSense(bluetooth);
+                        if (fromBluetooth != null)
+                        {
+                            succeeded++;
+                            result.Add(fromBluetooth);
+                        }
                     }
-                    continue;
+                }
+                else
+                {
+                    foreach (HidDeviceInfo device in group)
+                    {
+                        if (receivers.Contains(device))
+                        {
+                            continue;
+                        }
+
+                        attempts++;
+                        DeviceBattery item = ReadDualSense(device);
+                        if (item != null)
+                        {
+                            succeeded++;
+                            result.Add(item);
+                        }
+                    }
                 }
 
-                foreach (HidDeviceInfo device in group)
+                // 接收器单独读出来（标成 Receiver），交给上层决定显不显示
+                foreach (HidDeviceInfo receiver in receivers)
                 {
                     attempts++;
-                    DeviceBattery item = ReadDualSense(device);
+                    DeviceBattery item = ReadDualSense(receiver);
                     if (item != null)
                     {
                         succeeded++;
