@@ -241,36 +241,31 @@ namespace PeripheralBattery
         private static readonly List<string> s_receiverLogged = new List<string>();
 
         /// <summary>
-        /// 判断是不是原厂 DualSense。原厂对 feature report 0x20 一定回固件编译日期
-        /// （ASCII，形如 "Jul  4 2025 10:38:40"）；HAUTE42 这类 2.4G 接收器仿冒了
-        /// VID_054C / PID_0CE6，这一帧全是 0。读失败时不下结论（当作原厂），
-        /// 免得把正常设备误标成接收器。
+        /// 判断是不是原厂 DualSense。
+        ///
+        /// 判据是 HID 描述符里的特性报告长度：原厂最长 64 字节，
+        /// HAUTE42 这类仿冒接收器为了自己的配置协议声明成 128（实测 64 vs 128）。
+        ///
+        /// 不要用序列号、固件日期（0x20）、IMU 校准（0x05）判断——仿冒件整套照抄，
+        /// 连机身序列号都和真手柄一模一样。0x81（工厂地址）也不可靠：
+        /// 实测原厂回全 0，反倒是仿冒件回了一段数据。
+        ///
+        /// 蓝牙节点不做判断：它没有 USB 描述符可读，也没必要。
         /// </summary>
         private static bool IsGenuineDualSense(HidDeviceInfo device)
         {
+            if (!IsUsbTransport(device.DevicePath))
+            {
+                return true;
+            }
+
             bool cached;
             if (s_genuineCache.TryGetValue(device.DevicePath, out cached))
             {
                 return cached;
             }
 
-            byte[] report = new byte[64];
-            report[0] = 0x20;
-            string error;
-            bool genuine = true;
-            if (HidEnumerator.ReadFeatureReport(device, report, out error))
-            {
-                genuine = false;
-                for (int i = 1; i <= 11 && i < report.Length; i++)
-                {
-                    if (report[i] != 0)
-                    {
-                        genuine = true;
-                        break;
-                    }
-                }
-            }
-
+            bool genuine = device.FeatureReportLength <= 64;
             s_genuineCache[device.DevicePath] = genuine;
             return genuine;
         }
@@ -385,7 +380,8 @@ namespace PeripheralBattery
             if (item.Receiver && !s_receiverLogged.Contains(device.DevicePath))
             {
                 s_receiverLogged.Add(device.DevicePath);
-                Log.Write("DualSense 固件信息为空，标记为接收器：" + device.DevicePath);
+                Log.Write("DualSense 特性报告长度 " + device.FeatureReportLength
+                    + "（原厂 64），标记为接收器：" + device.DevicePath);
             }
             item.Error = abnormal ? "充电异常" : (headphone ? "耳机已连接" : null);
             return item;

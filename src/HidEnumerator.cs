@@ -118,9 +118,6 @@ namespace PeripheralBattery
         private static extern bool HidD_GetPreparsedData(IntPtr hidDeviceObject, out IntPtr preparsedData);
 
         [DllImport("hid.dll", SetLastError = true)]
-        private static extern bool HidD_GetFeature(IntPtr hidDeviceObject, byte[] buffer, int bufferLength);
-
-        [DllImport("hid.dll", SetLastError = true)]
         private static extern bool HidD_FreePreparsedData(IntPtr preparsedData);
 
         [DllImport("hid.dll")]
@@ -204,44 +201,6 @@ namespace PeripheralBattery
                 }
 
                 data = buffer;
-                return true;
-            }
-            finally
-            {
-                CloseHandle(handle);
-            }
-        }
-
-        /// <summary>
-        /// 读一帧 feature report。buffer[0] 放报告 ID，返回值里也带回来。
-        /// 用来问 DualSense 要固件信息（0x20），仿冒设备这一帧是全 0。
-        /// </summary>
-        internal static bool ReadFeatureReport(HidDeviceInfo device, byte[] buffer, out string error)
-        {
-            error = null;
-            if (device == null || buffer == null || buffer.Length == 0)
-            {
-                error = "参数无效";
-                return false;
-            }
-
-            IntPtr handle = CreateFile(
-                device.DevicePath, 0x80000000, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-            if (handle == InvalidHandleValue)
-            {
-                error = "打开设备失败：" + Marshal.GetLastWin32Error();
-                return false;
-            }
-
-            try
-            {
-                if (!HidD_GetFeature(handle, buffer, buffer.Length))
-                {
-                    error = "HidD_GetFeature 失败：" + Marshal.GetLastWin32Error();
-                    return false;
-                }
-
                 return true;
             }
             finally
