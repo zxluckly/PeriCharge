@@ -517,7 +517,7 @@ namespace PeripheralBattery
             return CreateRowLayout(
                 UiTheme.GetIconGlyph(item.Name),
                 online ? UiTheme.TextSecondary : UiTheme.TextDisabled,
-                UiTheme.GetDisplayName(item.Name),
+                UiTheme.GetDisplayName(item),
                 online ? UiTheme.TextPrimary : UiTheme.TextSecondary,
                 UiWidgets.FormatBatteryValue(item),
                 UiWidgets.ToMediaColor(online ? UiTheme.BatteryColor(item.Percent) : UiTheme.TextSecondary),

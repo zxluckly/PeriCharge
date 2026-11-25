@@ -203,6 +203,48 @@ namespace PeripheralBattery
         private static byte s_lastConnectByte = 0xFF;
         private static int s_lastReportLength = -1;
 
+        // 固件信息不会变，按设备路径缓存，省得每轮刷新都开一次设备去问
+        private static readonly Dictionary<string, bool> s_genuineCache =
+            new Dictionary<string, bool>();
+
+        // 已经打过日志的仿冒设备，避免每 30 秒刷一条
+        private static readonly List<string> s_receiverLogged = new List<string>();
+
+        /// <summary>
+        /// 判断是不是原厂 DualSense。原厂对 feature report 0x20 一定回固件编译日期
+        /// （ASCII，形如 "Jul  4 2025 10:38:40"）；HAUTE42 这类 2.4G 接收器仿冒了
+        /// VID_054C / PID_0CE6，这一帧全是 0。读失败时不下结论（当作原厂），
+        /// 免得把正常设备误标成接收器。
+        /// </summary>
+        private static bool IsGenuineDualSense(HidDeviceInfo device)
+        {
+            bool cached;
+            if (s_genuineCache.TryGetValue(device.DevicePath, out cached))
+            {
+                return cached;
+            }
+
+            byte[] report = new byte[64];
+            report[0] = 0x20;
+            string error;
+            bool genuine = true;
+            if (HidEnumerator.ReadFeatureReport(device, report, out error))
+            {
+                genuine = false;
+                for (int i = 1; i <= 11 && i < report.Length; i++)
+                {
+                    if (report[i] != 0)
+                    {
+                        genuine = true;
+                        break;
+                    }
+                }
+            }
+
+            s_genuineCache[device.DevicePath] = genuine;
+            return genuine;
+        }
+
         private static DeviceBattery ReadDualSense(HidDeviceInfo device)
         {
             byte[] report;
@@ -309,6 +351,12 @@ namespace PeripheralBattery
             item.UpdatedAt = DateTime.Now;
             item.Charging = charging;
             item.Full = full;
+            item.Receiver = !IsGenuineDualSense(device);
+            if (item.Receiver && !s_receiverLogged.Contains(device.DevicePath))
+            {
+                s_receiverLogged.Add(device.DevicePath);
+                Log.Write("DualSense 固件信息为空，标记为接收器：" + device.DevicePath);
+            }
             item.Error = abnormal ? "充电异常" : (headphone ? "耳机已连接" : null);
             return item;
         }

@@ -100,7 +100,7 @@ namespace PeripheralBattery
 
                 TextRenderer.DrawText(
                     e.Graphics,
-                    UiTheme.GetDisplayName(device.Name),
+                    UiTheme.GetDisplayName(device),
                     e.TextFont,
                     nameRect,
                     device.Online ? UiTheme.TextPrimary : UiTheme.TextSecondary,

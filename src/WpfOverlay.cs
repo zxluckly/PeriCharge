@@ -1286,7 +1286,7 @@ namespace PeripheralBattery
                 online ? UiTheme.TextSecondary : UiTheme.TextDisabled));
 
             TextBlock name = UiWidgets.CreateName(
-                UiTheme.GetDisplayName(item.Name), UiWidgets.NameMaxWidth,
+                UiTheme.GetDisplayName(item), UiWidgets.NameMaxWidth,
                 online ? UiTheme.TextPrimary : UiTheme.TextSecondary);
             name.Margin = new Thickness(UiWidgets.IconGap, 0, 0, 0);
             panel.Children.Add(name);

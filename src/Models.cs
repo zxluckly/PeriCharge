@@ -22,6 +22,12 @@ namespace PeripheralBattery
         public DateTime UpdatedAt { get; set; }
         public string Error { get; set; }
 
+        /// <summary>
+        /// 这台设备是仿冒 DualSense 的接收器（HAUTE42 之类），不是原厂手柄。
+        /// 判据是 feature report 0x20 里的固件编译日期：原厂一定有，仿冒的是全 0。
+        /// </summary>
+        public bool Receiver { get; set; }
+
         public DeviceBattery()
         {
             Id = string.Empty;
@@ -42,6 +48,7 @@ namespace PeripheralBattery
             copy.Full = Full;
             copy.UpdatedAt = UpdatedAt;
             copy.Error = Error;
+            copy.Receiver = Receiver;
             return copy;
         }
     }

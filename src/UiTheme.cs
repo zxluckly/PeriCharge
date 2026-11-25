@@ -81,6 +81,18 @@ namespace PeripheralBattery
             get { return Theme.IsLight() ? Color.FromArgb(200, 200, 200) : Color.FromArgb(66, 66, 66); }
         }
 
+        /// <summary>带「接收器」标注的显示名：仿冒 DualSense 的 2.4G 接收器要和真手柄区分开。</summary>
+        internal static string GetDisplayName(DeviceBattery item)
+        {
+            if (item == null)
+            {
+                return "未知设备";
+            }
+
+            string name = GetDisplayName(item.Name);
+            return item.Receiver ? name + "（接收器）" : name;
+        }
+
         internal static string GetDisplayName(string name)
         {
             if (string.IsNullOrEmpty(name))
