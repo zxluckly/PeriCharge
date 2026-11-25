@@ -59,12 +59,6 @@ namespace PeripheralBattery
 
         public int BrightnessStep = DefaultBrightnessStep;
 
-        /// <summary>
-        /// 曾经被自动隐藏过的仿冒接收器。只记一次：用户之后在菜单里重新勾上，
-        /// 就不会再被自动隐藏（否则每次刷新都跟他对着干）。
-        /// </summary>
-        public readonly List<string> AutoHiddenReceivers = new List<string>();
-
         private static string FolderPath
         {
             get
@@ -189,18 +183,6 @@ namespace PeripheralBattery
                                 MinBrightnessStep, Math.Min(MaxBrightnessStep, step));
                         }
                     }
-                    else if (key == "receiverAutoHidden")
-                    {
-                        settings.AutoHiddenReceivers.Clear();
-                        string[] ids = value.Split('|');
-                        foreach (string id in ids)
-                        {
-                            if (id.Length > 0)
-                            {
-                                settings.AutoHiddenReceivers.Add(id);
-                            }
-                        }
-                    }
                 }
 
                 // 旧版配置没有 configVersion。它的默认透明度是 230（约 90%），而 230
@@ -240,8 +222,7 @@ namespace PeripheralBattery
                     "compactThreshold=" + CompactThreshold,
                     "compactStyle=" + (int)CompactStyle,
                     "brightnessHidden=" + string.Join("|", HiddenBrightnessIds.ToArray()),
-                    "brightnessStep=" + BrightnessStep,
-                    "receiverAutoHidden=" + string.Join("|", AutoHiddenReceivers.ToArray())
+                    "brightnessStep=" + BrightnessStep
                 };
 
                 // 先写临时文件再整体替换：直接覆盖写时如果断电或进程被杀，

@@ -290,30 +290,6 @@ namespace PeripheralBattery
         private void UpdateUi()
         {
             DeviceBattery[] all = _service.Snapshot();
-
-            // 仿冒 DualSense 的 2.4G 接收器（HAUTE42 之类）会报一个假电量，
-            // 默认不占任务栏位置；只自动隐藏一次，用户之后在菜单里重新勾上就不再干预
-            bool autoHidden = false;
-            foreach (DeviceBattery item in all)
-            {
-                if (!item.Receiver
-                    || _settings.HiddenIds.Contains(item.Id)
-                    || _settings.AutoHiddenReceivers.Contains(item.Id))
-                {
-                    continue;
-                }
-
-                _settings.HiddenIds.Add(item.Id);
-                _settings.AutoHiddenReceivers.Add(item.Id);
-                autoHidden = true;
-                Log.Write("接收器默认不显示：" + UiTheme.GetDisplayName(item));
-            }
-
-            if (autoHidden)
-            {
-                _settings.Save();
-            }
-
             List<DeviceBattery> online = new List<DeviceBattery>();
             foreach (DeviceBattery item in all)
             {
