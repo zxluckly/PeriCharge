@@ -271,11 +271,13 @@ namespace PeripheralBattery
             bool full = isUsbReport && chargeState == 0x2 && capacity >= 10;
             int percent = Math.Min(capacity * 10 + 5, 100);
 
-            // 状态位 0x1 才是「充电中」，但 USB 模式下读不到它（恒为 0x2）。
-            // DualSense 只能有线充电，插着线又没满就当在充电，
-            // 否则插线时既没有 ⚡ 也没有 ✦，看起来像没识别到充电。
-            bool charging = isUsbReport
-                && (chargeState == 0x1 || (usbConnected && !abnormal && capacity < 10));
+            // 状态位 0x1 才是「充电中」。不要用「插着 USB 且没满」来推断：
+            // 插线但供电不足、或者插在只供电不充电的口上时，控制器自己会报 0x0（放电），
+            // 按插线推断就会凭空多出一个 ⚡。ds.evua.cc 也是只看这 4 位，不看有没有插线。
+            //
+            // 0x2 单独出现（等级 8、9 档）时只当作「充电完成」，不再据此给 100%，
+            // 也不当作充电中——否则又会变成「插线就从 85% 跳满」。
+            bool charging = isUsbReport && chargeState == 0x1;
 
             // 只在字节变化时记录，便于核对充电状态与 USB/耳机标志的实际取值。
             // 报告长度也要参与比较：USB 和蓝牙共用同一对静态变量，切换总线时
