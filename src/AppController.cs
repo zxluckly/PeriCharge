@@ -290,19 +290,51 @@ namespace PeripheralBattery
         private void UpdateUi()
         {
             DeviceBattery[] all = _service.Snapshot();
+            bool hasGenuine = HasGenuineDualSense(all);
+
             List<DeviceBattery> online = new List<DeviceBattery>();
             foreach (DeviceBattery item in all)
             {
                 // 只显示当前真正读到电量的设备，避免离线的历史配对设备常驻
-                if (!_settings.HiddenIds.Contains(item.Id) && item.Online)
+                if (!item.Online || _settings.HiddenIds.Contains(item.Id))
                 {
-                    online.Add(item);
+                    continue;
                 }
+
+                // 仿冒接收器只在「真手柄也在」的时候让位：只剩它一个时照样显示，
+                // 否则用户会看到任务栏上一条设备都没有
+                if (item.Receiver && hasGenuine)
+                {
+                    continue;
+                }
+
+                online.Add(item);
             }
 
             DeviceBattery[] shown = online.ToArray();
             _overlay.UpdateItems(shown);
             UpdateTrayIcon(shown);
+        }
+
+        /// <summary>列表里有没有原厂 DualSense（仿冒接收器不算）。</summary>
+        private static bool HasGenuineDualSense(DeviceBattery[] items)
+        {
+            if (items == null)
+            {
+                return false;
+            }
+
+            foreach (DeviceBattery item in items)
+            {
+                if (item.Online && !item.Receiver
+                    && item.Name != null
+                    && item.Name.IndexOf("DualSense", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void UpdateTrayIcon(DeviceBattery[] items)
@@ -444,6 +476,7 @@ namespace PeripheralBattery
             menu.Items.Add(title);
 
             DeviceBattery[] all = _service.Snapshot();
+            bool hasGenuine = HasGenuineDualSense(all);
             if (all.Length == 0)
             {
                 Forms.ToolStripMenuItem empty = new Forms.ToolStripMenuItem("（正在扫描或没有可读设备）");
@@ -454,9 +487,20 @@ namespace PeripheralBattery
             foreach (DeviceBattery snapshot in all)
             {
                 DeviceBattery item = snapshot;
-                Forms.ToolStripMenuItem deviceItem = new Forms.ToolStripMenuItem(UiTheme.GetDisplayName(item));
+
+                // 真手柄也在时，接收器是自动让位的：菜单里如实反映，别让勾选状态骗人
+                bool suppressed = item.Receiver && hasGenuine;
+
+                string text = UiTheme.GetDisplayName(item);
+                if (suppressed)
+                {
+                    text += "（真手柄在时不显示）";
+                }
+
+                Forms.ToolStripMenuItem deviceItem = new Forms.ToolStripMenuItem(text);
                 deviceItem.Tag = item;
-                deviceItem.CheckState = _settings.HiddenIds.Contains(item.Id)
+                deviceItem.Enabled = !suppressed;
+                deviceItem.CheckState = suppressed || _settings.HiddenIds.Contains(item.Id)
                     ? Forms.CheckState.Unchecked
                     : Forms.CheckState.Checked;
                 deviceItem.Click += delegate { ToggleDevice(item.Id); };
